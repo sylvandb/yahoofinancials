@@ -133,7 +133,9 @@ def fetch_url_curl(url):
 
 def fetch_url_requests(url):
     trace()
-    r = requests.get(url, timeout=10)
+    # tried timeout values: 5, 10, 20
+    # with no repeatable difference in failures
+    r = requests.get(url, timeout=5)
     return r.status_code, r.text
 
 fetch_url = fetch_url_requests
