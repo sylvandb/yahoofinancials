@@ -42,8 +42,6 @@ earnings_data = yahoo_financials.get_stock_earnings_data()
 historical_prices = yahoo_financials.get_historical_price_data('2015-01-15', '2017-10-15', 'weekly')
 """
 
-from __future__ import print_function
-
 import sys
 import calendar
 import re
@@ -55,13 +53,7 @@ import pytz
 import random
 from subprocess import check_output, CalledProcessError
 import requests
-try:
-    from gzip import decompress as gzipdecompress
-except ImportError:
-    from gzip import GzipFile
-    from StringIO import StringIO
-    def gzipdecompress(s):
-        return GzipFile(fileobj=StringIO(s)).read()
+from gzip import decompress as gzipdecompress
 from zlib import decompress as zlibdecompress
 
 
@@ -335,9 +327,6 @@ class YahooFinanceETL(object):
                 dict_ent = {k: formatted_date}
             elif v is None or isinstance(v, str) or isinstance(v, int) or isinstance(v, float):
                 dict_ent = {k: v}
-            # Python 2 and Unicode
-            elif sys.version_info < (3, 0) and isinstance(v, unicode):
-                dict_ent = {k: v}
             else:
                 numerical_val = self._determine_numeric_value(v)
                 dict_ent = {k: numerical_val}
@@ -408,8 +397,6 @@ class YahooFinanceETL(object):
     def _get_api_data(self, api_url, tries=0):
         rescode, res_content = fetch_url(api_url)
         if rescode == 200:
-            if sys.version_info < (3, 0):
-                return loads(res_content)
             return loads(res_content.decode('utf-8'))
         else:
             if tries < 5:
