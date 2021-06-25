@@ -42,6 +42,7 @@ earnings_data = yahoo_financials.get_stock_earnings_data()
 historical_prices = yahoo_financials.get_historical_price_data('2015-01-15', '2017-10-15', 'weekly')
 """
 
+import os
 import sys
 import calendar
 import re
@@ -60,16 +61,60 @@ from zlib import decompress as zlibdecompress
 # log information about failed requests - get or parse failures
 LOG_FAILURES = True
 
+# tried timeout values: 5, 10, 20
+# with no repeatable difference in failures
+# less than 5 seems potentially a problem, but maybe only if breaking anyway?
+# 2 seems plenty when things are running well, but may not be enough on busy days
+READ_TIMEOUT = 4
+READ_TRIES = 2
+
+# report various elapsed time
+TIME_REPORT = False
+try:
+    TIME_REPORT = bool(int(os.environ['time_yahoofinancials']))
+except (KeyError, TypeError):
+    pass
+
 # print how much debug output
 DEBUG = 0
+try:
+    DEBUG = int(os.environ['debug_yahoofinancials'])
+except (KeyError, TypeError):
+    pass
 
 # add Accept-Encoding header for gzip (and deflate)
 # yahoo will sometimes send gzip even without the header!
 ACCEPT_GZIP = True
 
+# Minimum interval between Yahoo Finance requests for this instance
+_MIN_INTERVAL = 7
+# Always delay a minimum - like a human
+_MIN_DELAY = 0.25
 
 # track the last get timestamp to add a minimum delay between gets - be nice!
 _lastget = 0
+def _be_nice():
+    global _lastget
+    now = int(time.time())
+    elapsed = now - _lastget
+    this_delay = max(_MIN_DELAY, _MIN_INTERVAL - elapsed)
+    if TIME_REPORT: print("\nelapsed: %s, delay: %s" % (elapsed, this_delay), file=sys.stderr, end='')
+    if _lastget and elapsed < _MIN_INTERVAL:
+        time.sleep(this_delay)
+        now = int(time.time())
+    _lastget = now
+
+
+if TIME_REPORT:
+    def time_report(f, *a, **kwa):
+        _bef = time.time()
+        _rv = f(*a, **kwa)
+        _ela = time.time() - _bef
+        print(f"\nto {f}: {_ela}", file=sys.stderr, end='')
+        return _rv
+else:
+    def time_report(f, *a, **kwa):
+        return f(*a, **kwa)
 
 
 if DEBUG:
@@ -79,26 +124,37 @@ if DEBUG:
     _tracefargs = []
     def trace(*args):
         fname = traceback.extract_stack(None, 2)[0][2]
+        fargnames, _, _, flocals = inspect.getargvalues(inspect.currentframe().f_back)
+        fargs = ['%s=%s' % (a, flocals[a]) for a in fargnames]
+        if fargs == _tracefargs:
+            fargs = ['...']
+        else:
+            del _tracefargs[:]
+            _tracefargs.extend(fargs)
         if DEBUG > 9:
-            fargnames, _, _, flocals = inspect.getargvalues(inspect.currentframe().f_back)
-            fargs = ['%s=%s' % (a, flocals[a]) for a in fargnames]
-            if fargs == _tracefargs:
-                fargs = ['...']
-            else:
-                del _tracefargs[:]
-                _tracefargs.extend(fargs)
-            print("%s(%s): %s" % (
+            print("%s(%r)\n :  %s" % (
                 fname,
                 ', '.join(fargs),
-                '; '.join(args),
+                '\n :  '.join(args),
                 ), file=sys.stderr)
         elif DEBUG > 1:
-            print("%s: %s" % (
+            print("%s(%r)" % (
                 fname,
-                '; '.join(args),
+                ', '.join(fargs),
+                ), file=sys.stderr)
+        else:
+            print("%s(...x%d...)" % (
+                fname,
+                len(fargs),
                 ), file=sys.stderr)
 else:
     def trace(*args): pass
+
+
+def fetch_url(url):
+    trace()
+    r = time_report(requests.get, url, timeout=READ_TIMEOUT)
+    return r.status_code, r.text
 
 
 # Custom Exception class to handle custom error
@@ -112,36 +168,12 @@ class URLOpenException(ManagedException):
     pass
 
 
-
-def fetch_url_curl(url):
-    try:
-        response_content = check_output(['curl', '-L', '-s', url])
-        rescode = 200
-    except CalledProcessError as e:
-        response_content = None
-        rescode = 401
-        if DEBUG: print('fail %d: %s' % (e.returncode, e.output), file=sys.stderr)
-    return rescode, response_content
-
-def fetch_url_requests(url):
-    trace()
-    # tried timeout values: 5, 10, 20
-    # with no repeatable difference in failures
-    r = requests.get(url, timeout=5)
-    return r.status_code, r.text
-
-fetch_url = fetch_url_requests
-
-
 # Class containing Yahoo Finance ETL Functionality
 class YahooFinanceETL(object):
 
     def __init__(self, ticker):
         self.ticker = [ticker.upper()] if isinstance(ticker, str) else [t.upper() for t in ticker]
         self._cache = {}
-
-    # Minimum interval between Yahoo Finance requests for this instance
-    _MIN_INTERVAL = 7
 
     # Meta-data dictionaries for the classes to use
     YAHOO_FINANCIAL_TYPES = {
@@ -193,19 +225,15 @@ class YahooFinanceETL(object):
 
     # Private method to scrape data from yahoo finance
     def _scrape_data(self, url):
-        global _lastget
         if not self._cache.get(url):
-            now = int(time.time())
-            if _lastget and now - _lastget < self._MIN_INTERVAL:
-                time.sleep(self._MIN_INTERVAL - (now - _lastget) + 1)
-                now = int(time.time())
-            _lastget = now
+            _be_nice()
             # Try to open the URL multiple times sleeping random time between tries
-            max_retry = 2
-            for i in range(0, max_retry):
+            for tries in range(READ_TRIES):
+                if tries:
+                    time.sleep(random.randrange(10, 20))
                 rescode, response_content = fetch_url(url)
+                trace('rescode=%s' % rescode)
                 if rescode == 200:
-                    trace('rescode=%s' % rescode)
                     soup = BeautifulSoup(response_content, "html.parser")
                     re_script = soup.find("script", text=re.compile("root.App.main"))
                     if re_script is None:
@@ -222,15 +250,16 @@ class YahooFinanceETL(object):
                     if not script:
                         script = re_script.string
                     self._cache[url] = loads(re.search("root.App.main\s+=\s+(\{.*\})", script).group(1))
-                    trace('cached: %s' % (self._cache[url],))
+                    if DEBUG > 2:
+                        trace('cached: %s' % (self._cache[url],))
+                    else:
+                        trace('cached: %s' % (url,))
                     break
-                print("Fail try %d, code %d from %s" % (i, rescode, url), file=sys.stderr)
-                if i < max_retry - 1:
-                    time.sleep(random.randrange(10, 20))
+                print("Fail try %d, code %d from %s" % (tries + 1, rescode, url), file=sys.stderr)
             else:
                 print("Failed, code %d from %s" % (rescode, url), file=sys.stderr)
-                # Raise a custom exception if we can't get the web page within max_retry attempts
-                # exhausted all the retries so remember this failure
+                # Raise a custom exception if we can't get the web page
+                # exhausted all the tries so remember this failure
                 self._cache[url] = URLOpenException(
                         "Server replied with HTTP %d code while opening the url: %s" % (
                         rescode, url))
@@ -245,7 +274,10 @@ class YahooFinanceETL(object):
         except Exception as e:
             print("Failed, missing stores in %s bytes from '%s': %s" % (storekey, len(str(data)), url, e), file=sys.stderr)
             raise
-        trace('stores: %s' % (stores,))
+        if DEBUG > 2:
+            trace('stores: %s' % (stores,))
+        else:
+            trace('stores: x%d' % (len(stores),))
         return stores
 
     # Private static method to determine if a numerical value is in the data object being cleaned
@@ -395,17 +427,20 @@ class YahooFinanceETL(object):
         return api_url
 
     # Private Method to get financial data via API Call
-    def _get_api_data(self, api_url, tries=0):
-        rescode, res_content = fetch_url(api_url)
-        if rescode == 200:
-            return loads(res_content.decode('utf-8'))
-        else:
-            if tries < 5:
+    def _get_api_data(self, api_url):
+        json_content = None
+        _be_nice()
+        for tries in range(READ_TRIES):
+            if tries:
                 time.sleep(random.randrange(10, 20))
-                tries += 1
-                return self._get_api_data(api_url, tries)
-            else:
-                return None
+            rescode, res_content = fetch_url(api_url)
+            try:
+                if rescode == 200:
+                    json_content = loads(res_content.decode('utf-8'))
+                    break
+            except:
+                pass
+        return json_content
 
     # Private Method to clean API data
     def _clean_api_data(self, api_url):
@@ -479,7 +514,7 @@ class YahooFinanceETL(object):
             YAHOO_URL = self._BASE_YAHOO_URL + up_ticker + '/' +\
                 self.YAHOO_FINANCIAL_TYPES[statement_type][0] + '?p=' + up_ticker
             try:
-                re_data = self._scrape_data(YAHOO_URL)["QuoteSummaryStore"]
+                re_data = time_report(self._scrape_data, YAHOO_URL)["QuoteSummaryStore"]
             except KeyError:
                 re_data = None
             try:
@@ -543,7 +578,7 @@ class YahooFinanceETL(object):
         for tick in self.ticker:
             try:
                 e = None
-                dict_ent = self._create_dict_ent(tick, statement_type, tech_type, report_name, hist_obj)
+                dict_ent = time_report(self._create_dict_ent, tick, statement_type, tech_type, report_name, hist_obj)
                 data.update(dict_ent)
             except URLOpenException as e:
                 print("Warning! Ticker: %s: %s" % (tick, e), file=sys.stderr)
