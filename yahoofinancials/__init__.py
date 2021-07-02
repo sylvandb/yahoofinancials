@@ -1,15 +1,15 @@
+#!/usr/bin/env python3
 """
 ==============================
 The Yahoo Financials Module
-Version: 1.5
 ==============================
 
 Author: Connor Sanders
-Email: sandersconnor1@gmail.com
-Version Released: 01/27/2019
-Tested on Python 2.7, 3.3, 3.4, 3.5, 3.6, and 3.7
+Changed: Sylvan Butler
+Python3 only
 
 Copyright (c) 2019 Connor Sanders
+Copyright (c) 2021 Sylvan Butler
 MIT License
 
 List of Included Functions:
@@ -57,6 +57,8 @@ import requests
 from gzip import decompress as gzipdecompress
 from zlib import decompress as zlibdecompress
 
+# meh
+VERSTR = '1.1'
 
 # log information about failed requests - get or parse failures
 LOG_FAILURES = True
@@ -65,7 +67,7 @@ LOG_FAILURES = True
 # with no repeatable difference in failures
 # less than 5 seems potentially a problem, but maybe only if breaking anyway?
 # 2 seems plenty when things are running well, but may not be enough on busy days
-READ_TIMEOUT = 4
+READ_TIMEOUT = 3
 READ_TRIES = 2
 
 # report various elapsed time
@@ -82,24 +84,31 @@ try:
 except (KeyError, TypeError):
     pass
 
-# add Accept-Encoding header for gzip (and deflate)
-# yahoo will sometimes send gzip even without the header!
-ACCEPT_GZIP = True
+# user-agent header options
+# yahoo will sometimes start returning 404 for some user-agents
+# yahoo will sometimes be too smart for some user-agents
+UAs = [
+    'My User Agent',
+    'World Wide Web',
+]
 
 # Minimum interval between Yahoo Finance requests for this instance
 _MIN_INTERVAL = 7
+_MAX_INTERVAL = 30
 # Always delay a minimum - like a human
 _MIN_DELAY = 0.25
+# vary by +/-
+_VARIANCE = 2
 
 # track the last get timestamp to add a minimum delay between gets - be nice!
 _lastget = 0
 def _be_nice():
     global _lastget
     now = int(time.time())
-    elapsed = now - _lastget
-    this_delay = max(_MIN_DELAY, _MIN_INTERVAL - elapsed)
-    if TIME_REPORT: print("\nelapsed: %s, delay: %s" % (elapsed, this_delay), file=sys.stderr, end='')
-    if _lastget and elapsed < _MIN_INTERVAL:
+    if _lastget:
+        elapsed = now - _lastget
+        this_delay = max(_MIN_DELAY, _MIN_INTERVAL - elapsed - _VARIANCE + random.randint(0, 2 * _VARIANCE))
+        if TIME_REPORT: print("\nelapsed: %s, delay: %s" % (elapsed, this_delay), file=sys.stderr, end='')
         time.sleep(this_delay)
         now = int(time.time())
     _lastget = now
@@ -151,9 +160,34 @@ else:
     def trace(*args): pass
 
 
+def reset_headers():
+    HEADERS.clear()
+    # add user-agent header
+    # add Accept-Encoding header for gzip (and deflate)
+    # yahoo will sometimes send gzip even without the header!
+    HEADERS.update({
+        'User-Agent': "%s %s" % (random.choice(UAs), VERSTR),
+        'Accept-Encoding': 'gzip, deflate',
+    })
+
+HEADERS = {}
+reset_headers()
+
+
 def fetch_url(url):
+    global _MIN_INTERVAL, _lastget
     trace()
-    r = time_report(requests.get, url, timeout=READ_TIMEOUT)
+    try:
+        r = time_report(requests.get, url, headers=HEADERS, timeout=READ_TIMEOUT)
+    except (requests.Timeout, requests.HTTPError) as e:
+        # increase delay between attempts
+        _MIN_INTERVAL = min(_MIN_INTERVAL * 1.1, _MAX_INTERVAL)
+        print('\nError in get(%r, %r): %s\nmin_interval now %f' % (url, HEADERS['User-Agent'], e, _MIN_INTERVAL), file=sys.stderr)
+        # delay so won't scale up just because this failure was quicker than _MIN_INTERVAL
+        _be_nice()
+        # try different headers - specifically user-agent
+        reset_headers()
+        raise
     return r.status_code, r.text
 
 
@@ -195,15 +229,6 @@ class YahooFinanceETL(object):
     # Base Yahoo Finance URL for the class to build on
     _BASE_YAHOO_URL = 'https://finance.yahoo.com/quote/'
 
-    # private static method to get the appropriate report type identifier
-    @staticmethod
-    def get_report_type(frequency):
-        if frequency == 'annual':
-            report_num = 1
-        else:
-            report_num = 2
-        return report_num
-
     # Public static method to format date serial string to readable format and vice versa
     @staticmethod
     def format_date(in_date):
@@ -226,9 +251,13 @@ class YahooFinanceETL(object):
     # Private method to scrape data from yahoo finance
     def _scrape_data(self, url):
         if not self._cache.get(url):
+            rescode = 0
             _be_nice()
             # Try to open the URL multiple times sleeping random time between tries
             for tries in range(READ_TRIES):
+                if rescode == 404:
+                    # won't succeed, run out the tries
+                    continue
                 if tries:
                     time.sleep(random.randrange(10, 20))
                 rescode, response_content = fetch_url(url)
@@ -499,22 +528,24 @@ class YahooFinanceETL(object):
 
     # Private Method to take scrapped data and build a data dictionary with
     def _create_dict_ent(self, up_ticker, statement_type, tech_type, report_name, hist_obj):
+        #print(f"_create_dict_ent({up_ticker!r}, {statement_type!r}, {tech_type!r}, {report_name!r}, ...)")
         if statement_type == 'history':
-            YAHOO_URL = self._build_historical_url(up_ticker, hist_obj)
+            yahoo_url = self._build_historical_url(up_ticker, hist_obj)
             try:
                 cleaned_re_data = self._recursive_api_request(hist_obj, up_ticker)
             except KeyError:
                 try:
-                    re_data = self._scrape_data(YAHOO_URL)["HistoricalPriceStore"]
+                    re_data = self._scrape_data(yahoo_url)["HistoricalPriceStore"]
                     cleaned_re_data = self._clean_historical_data(re_data)
                 except KeyError:
                     cleaned_re_data = None
             dict_ent = {up_ticker: cleaned_re_data}
         else:
-            YAHOO_URL = self._BASE_YAHOO_URL + up_ticker + '/' +\
+            yahoo_url = self._BASE_YAHOO_URL + up_ticker + '/' +\
                 self.YAHOO_FINANCIAL_TYPES[statement_type][0] + '?p=' + up_ticker
+            #print(f"scraping: {yahoo_url!r}")
             try:
-                re_data = time_report(self._scrape_data, YAHOO_URL)["QuoteSummaryStore"]
+                re_data = time_report(self._scrape_data, yahoo_url)["QuoteSummaryStore"]
             except KeyError:
                 re_data = None
             try:
@@ -522,7 +553,9 @@ class YahooFinanceETL(object):
                     dict_ent = {up_ticker: re_data[tech_type]}
                 else:
                     dict_ent = {up_ticker: re_data[u'' + report_name], 'dataType': report_name}
-            except KeyError:
+            except (KeyError, TypeError):
+                # KeyError: ???
+                # TypeError: when re_data is None
                 dict_ent = {up_ticker: re_data, 'dataType': report_name}
         return dict_ent
 
@@ -576,24 +609,28 @@ class YahooFinanceETL(object):
     def get_stock_data(self, statement_type='income', tech_type='', report_name='', hist_obj={}):
         data = {}
         for tick in self.ticker:
+            exc = None
             try:
-                e = None
                 dict_ent = time_report(self._create_dict_ent, tick, statement_type, tech_type, report_name, hist_obj)
                 data.update(dict_ent)
             except URLOpenException as e:
                 print("Warning! Ticker: %s: %s" % (tick, e), file=sys.stderr)
+                exc = e
             except ParseException as e:
                 print("Warning! Ticker: %s: %s" % (tick, e), file=sys.stderr)
+                exc = e
             except ManagedException as e:
                 print("Warning! Ticker: %s: %s" % (tick, e), file=sys.stderr)
+                exc = e
             finally:
-                if e:
+                if exc:
                     print("The process is still running...", file=sys.stderr)
                     if LOG_FAILURES:
                         now = time.strftime('%Y%m%dT%H%M%S')
                         sep = '-----' * 15
-                        with open('/tmp/%s-%s.log' % (now[:8], tick), 'a+b') as f:
-                            print("Warning! Ticker: %s: %s" % (tick, e), file=f)
+                        with open('/tmp/%s-%s.log' % (now[:8], tick), 'a+') as f:
+                            print("Warning! Ticker: %s: %s" % (tick, exc), file=f)
+                            print(f"get_stock_data({statement_type!r}, {tech_type!r}, {report_name!r}, ...)", file=f)
                             for eurl, edata in self._cache.items():
                                 f.write('%s\nts: %s\nkey: %s\nurl: %s\ninfo: %s\ndata:\n%s\n' % (
                                     sep, now, eurl,
@@ -675,16 +712,12 @@ class YahooFinancials(YahooFinanceETL):
     # Private method that handles financial statement extraction
     def _run_financial_stmt(self, statement_type, report_num, reformat):
         report_name = self.YAHOO_FINANCIAL_TYPES[statement_type][report_num]
-        if reformat:
-            raw_data = self.get_stock_data(statement_type, report_name=report_name)
-            data = self.get_reformatted_stmt_data(raw_data, statement_type)
-        else:
-            data = self.get_stock_data(statement_type, report_name=report_name)
-        return data
+        raw_data = self.get_stock_data(statement_type, report_name=report_name)
+        return self.get_reformatted_stmt_data(raw_data, statement_type) if reformat else raw_data
 
     # Public Method for the user to get financial statement data
     def get_financial_stmts(self, frequency, statement_type, reformat=True):
-        report_num = self.get_report_type(frequency)
+        report_num = 1 if frequency == 'annual' else 2
         if isinstance(statement_type, str):
             data = self._run_financial_stmt(statement_type, report_num, reformat)
         else:
@@ -696,35 +729,27 @@ class YahooFinancials(YahooFinanceETL):
 
     # Public Method for the user to get stock price data
     def get_stock_price_data(self, reformat=True):
-        if reformat:
-            return self.get_clean_data(self.get_stock_tech_data('price'), 'price')
-        else:
-            return self.get_stock_tech_data('price')
+        r = self.get_stock_tech_data('price')
+        return self.get_clean_data(r, 'price') if reformat else r
 
     # Public Method for the user to return key-statistics data
     def get_key_statistics_data(self, reformat=True):
-        if reformat:
-            return self.get_clean_data(self.get_stock_tech_data('defaultKeyStatistics'), 'defaultKeyStatistics')
-        else:
-            return self.get_stock_tech_data('defaultKeyStatistics')
+        r = self.get_stock_tech_data('defaultKeyStatistics')
+        return self.get_clean_data(r, 'defaultKeyStatistics') if reformat else r
 
     # Public Method for the user to get stock earnings data
     def get_stock_earnings_data(self, reformat=True):
-        if reformat:
-            return self.get_clean_data(self.get_stock_tech_data('earnings'), 'earnings')
-        else:
-            return self.get_stock_tech_data('earnings')
+        r = self.get_stock_tech_data('earnings')
+        return self.get_clean_data(r, 'earnings') if reformat else r
 
     # Public Method for the user to get stock summary data
     def get_summary_data(self, reformat=True):
-        if reformat:
-            return self.get_clean_data(self.get_stock_tech_data('summaryDetail'), 'summaryDetail')
-        else:
-            return self.get_stock_tech_data('summaryDetail')
+        r = self.get_stock_tech_data('summaryDetail')
+        return self.get_clean_data(r, 'summaryDetail') if reformat else r
 
     # Public Method for the user to get the yahoo summary url
     def get_stock_summary_url(self):
-        return {t: self._BASE_YAHOO_URL + t for t in self.ticker}
+        return {t: "%s%s/?p=%s" % (self._BASE_YAHOO_URL, t, t) for t in self.ticker}
 
     # Public Method for the user to get stock quote data
     def get_stock_quote_type_data(self):
