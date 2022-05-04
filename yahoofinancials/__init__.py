@@ -63,11 +63,33 @@ VERSTR = '1.1'
 # log information about failed requests - get or parse failures
 LOG_FAILURES = True
 
-# tried timeout values: 5, 10, 20
-# with no repeatable difference in failures
-# less than 5 seems potentially a problem, but maybe only if breaking anyway?
-# 2 seems plenty when things are running well, but may not be enough on busy days
-READ_TIMEOUT = 3
+# timeout objectives:
+#  - fail fast if it is going to fail eventually
+#  - don't fail if it just needs a second or two longer to succeed
+# with timeout=5:
+#  Max fetch 5.1632, last: 0.6376, average(0.5085 .. 5.1632, 80): 1.5045
+#   6: **********
+#   7: ***************************
+#   8: **********
+#   9: *******
+#  16: *
+#  23: **
+#  28: **
+#  29: ****
+#  30: ****
+#  32: ***
+#  33: ***
+#  36: *
+#  41: **
+#  44: **
+#  45: *
+#  52: *
+# conclusions:
+#  -seems 2s are plenty when things are normal, but not enough on busy days
+#  -tried timeout values: 5, 10, 20s; with no repeatable difference in failures
+#  -less than 5 seems potentially a problem, but maybe only if breaking anyway?
+#  -timeout is not always respected - timeout 6 has succeeded after 18 seconds
+READ_TIMEOUT = 6
 READ_TRIES = 2
 
 # report various elapsed time
@@ -76,6 +98,12 @@ try:
     TIME_REPORT = bool(int(os.environ['time_yahoofinancials']))
 except (KeyError, TypeError):
     pass
+try:
+    STAT_REPORT = int(os.environ['stat_yahoofinancials'])
+except (KeyError, TypeError):
+    STAT_REPORT = TIME_REPORT
+# see urls with delays
+SEE_FETCH = False
 
 # print how much debug output
 DEBUG = 0
@@ -95,12 +123,17 @@ UAs = [
 # Minimum interval between Yahoo Finance requests for this instance
 _MIN_INTERVAL = 7
 _MAX_INTERVAL = 30
+# on error a longer interval
+_MORE_INTERVAL = 1.1
+# on success a shorter interval
+_LESS_INTERVAL = 0.96
 # Always delay a minimum - like a human
 _MIN_DELAY = 0.25
 # vary by +/-
 _VARIANCE = 2
 
 # track the last get timestamp to add a minimum delay between gets - be nice!
+_interval = _MIN_INTERVAL
 _lastget = 0
 _niceeven = False
 def _be_nice():
@@ -108,26 +141,23 @@ def _be_nice():
     now = time.time()
     if _lastget:
         elapsed = now - _lastget
-        this_delay = round(_MIN_INTERVAL - elapsed - _VARIANCE + (random.random() * 2 * _VARIANCE), 2)
+        this_delay = round(_interval - elapsed - _VARIANCE + (random.random() * 2 * _VARIANCE), 2)
         this_delay = max(_MIN_DELAY, this_delay)
         this_delay = this_delay / (_niceeven + 1)
         if TIME_REPORT: print(f"\n{now:.3f} elapsed: {elapsed:.3f}, delay: {this_delay:.3f}", file=sys.stderr, end='')
+        if SEE_FETCH:   print(f"\n{now:.3f} elapsed: {elapsed:.3f}, delay: {this_delay:.3f}")
         time.sleep(this_delay)
         now = time.time()
     _niceeven = not _niceeven
     _lastget = now
 
 
-if TIME_REPORT:
-    def time_report(f, *a, **kwa):
-        _bef = time.time()
-        _rv = f(*a, **kwa)
-        _ela = time.time() - _bef
-        print(f"\nto {f}: {_ela}", file=sys.stderr, end='')
-        return _rv
-else:
-    def time_report(f, *a, **kwa):
-        return f(*a, **kwa)
+def time_report(f, *a, **kwa):
+    bef = time.time()
+    rv = f(*a, **kwa)
+    elapsed = time.time() - bef
+    if TIME_REPORT: print(f"\nto {f}: {elapsed}", file=sys.stderr, end='')
+    return rv
 
 
 if DEBUG:
@@ -178,21 +208,112 @@ HEADERS = {}
 reset_headers()
 
 
+_url_cache = {}
+_fstats = {
+    'pass': {
+        'num': 0,
+        'sum': 0,
+        'avg': 0,
+        'min': 99,
+        'max': 0,
+        'hist': {}
+    },
+    'fail': {
+        'num': 0,
+        'sum': 0,
+        'avg': 0,
+        'min': 99,
+        'max': 0,
+        'hist': {}
+    },
+    'cached': 0,
+    'timeout': READ_TIMEOUT,
+}
+
+def fetch_stats():
+    return _fstats
+
+def fetch_stats_hist_as_str(fs=_fstats['pass']):
+    histo = []
+    num = _fstats['pass']['num']
+    err = _fstats['fail']['num']
+    cached = _fstats['cached']
+    if num or err or cached:
+        histo.extend("%2s: %s" % (k, '*' * fs['hist'][k]) for k in sorted(fs['hist'].keys()))
+        histo.append(f"number: {num}, errors: {err}, cached: {cached}")
+    return histo
+
+
+_fetch_start = []
+
+def _fetch_stats_update(fs, elapsed):
+    fs['num'] += 1
+    fs['sum'] += elapsed
+    fs['avg'] = fs['sum'] / fs['num']
+    fs['min'] = min(fs['min'], elapsed)
+    fs['max'] = max(fs['max'], elapsed)
+    # primitive 'ceiling' -- 0.0-0.1 = 1, 0.101-0.2 = 2, ...
+    histn = int(-(elapsed * 100000 // -10000))
+    fs['hist'][histn] = 1 + fs['hist'].get(histn, 0)
+
+# maybe this should be a context manager
+def _fetch_stats(start=False, err=None, url=None, cached=False):
+    global _interval
+    if cached:
+        _fstats['cached'] += 1
+    elif err:
+        elapsed = time.time() - _fetch_start.pop()
+        _fetch_stats_update(_fstats['fail'], elapsed)
+        # increase delay between attempts
+        _interval = min(_interval * _MORE_INTERVAL, _MAX_INTERVAL)
+        print('\nError req.get(%r, %r): %s\nmin_interval now %f' % (url, HEADERS['User-Agent'], err, _interval), file=sys.stderr)
+        # try different headers - specifically user-agent
+        reset_headers()
+    elif start and _fetch_start:
+        raise ValueError("_fetch_stats request overlap is not supported: %s" % (url,))
+    elif start:
+        _fetch_start.append(time.time())
+    else:
+        elapsed = time.time() - _fetch_start.pop()
+        fsp = _fstats['pass']
+        if elapsed < fsp['avg']:
+            # decrease delay between attempts
+            _interval = max(_interval * _LESS_INTERVAL, _MIN_INTERVAL)
+        #elif elapsed > (2 * fsp['avg']):
+        #    # increase delay between attempts
+        #    _interval = min(_interval * _MORE_INTERVAL, _MAX_INTERVAL)
+        _fetch_stats_update(fsp, elapsed)
+        if STAT_REPORT and not fsp['num'] % 10:
+            fsf = _fstats['fail']
+            outfile = sys.stdout if STAT_REPORT > 1 else sys.stderr
+            report = [f"\nMax fetch {fsp['max']:.4f}, last: {elapsed:.4f}, average: {fsp['avg']:.4f}, ok: {fsp['num']} ({fsp['min']:.4f} .. {fsp['max']:.4f}), errors: {fsf['num']}"]
+            if fsf['num']:
+                report.append(f"({fsf['min']:.4f} .. {fsf['max']:.4f}, average: {fsf['avg']})")
+            print(' '.join(report), file=outfile)
+            print('\n'.join(fetch_stats_hist_as_str()), file=outfile)
+
 def fetch_url(url):
-    global _MIN_INTERVAL, _lastget
     trace()
+    try:
+        r = _url_cache[url]
+        _fetch_stats(cached=True)
+        return r
+    except KeyError:
+        pass
     _be_nice()
+    if SEE_FETCH: print(f"  fetch_url({url})")
+    _fetch_stats(start=True)
     try:
         r = time_report(requests.get, url, headers=HEADERS, timeout=READ_TIMEOUT)
     except (requests.Timeout, requests.HTTPError) as e:
-        # increase delay between attempts
-        _MIN_INTERVAL = min(_MIN_INTERVAL * 1.1, _MAX_INTERVAL)
-        print('\nError in get(%r, %r): %s\nmin_interval now %f' % (url, HEADERS['User-Agent'], e, _MIN_INTERVAL), file=sys.stderr)
-        # delay so won't scale up just because this failure was quicker than _MIN_INTERVAL
-        _be_nice()
-        # try different headers - specifically user-agent
-        reset_headers()
+        _fetch_stats(url=url, err=str(e))
         raise
+    # cache everything except temporary fails
+    if r.status_code < 500:
+        _fetch_stats()
+        _url_cache[url] = (r.status_code, r.text)
+    else:
+        _fetch_stats(url=url, err='HTTP_%s' % (r.status_code,))
     return r.status_code, r.text
 
 
@@ -256,6 +377,7 @@ class YahooFinanceETL(object):
     # Private method to scrape data from yahoo finance
     def _scrape_data(self, url):
         if not self._cache.get(url):
+
             rescode = 0
             # Try to open the URL multiple times sleeping random time between tries
             for tries in range(READ_TRIES):
@@ -278,15 +400,18 @@ class YahooFinanceETL(object):
                         self._cache[url].info = 'none-ok' #response.info()
                         self._cache[url].data = response_content
                         break
-                    script = re_script.text
                     # bs4 4.9.0 changed so text from scripts is no longer considered text
-                    if not script:
-                        script = re_script.string
-                    self._cache[url] = loads(re.search("root.App.main\s+=\s+(\{.*\})", script).group(1))
-                    if DEBUG > 2:
-                        trace('cached: %s' % (self._cache[url],))
-                    else:
-                        trace('cached: %s' % (url,))
+                    script = re_script.text or re_script.string
+                    data = loads(re.search("root.App.main\s+=\s+(\{.*\})", script).group(1))
+                    try:
+                        stores = data["context"]["dispatcher"]["stores"]
+                    except Exception as e:
+                        # no point in trying this over and over again so remember the parse failure
+                        self._cache[url] = ParseException(
+                                "Failed, missing stores in %s bytes from '%s': %s" % (storekey, len(str(data)), url, e))
+                        self._cache[url].url = url
+                        self._cache[url].info = 'none-ok'
+                        self._cache[url].data = str(data)
                     break
                 print("Fail try %d, code %d from %s" % (tries + 1, rescode, url), file=sys.stderr)
             else:
@@ -299,19 +424,21 @@ class YahooFinanceETL(object):
                 self._cache[url].url = url
                 self._cache[url].info = 'none'
                 self._cache[url].data = "HTTP %d" % (rescode,)
-        data = self._cache[url]
-        if isinstance(data, Exception):
-            raise data
-        try:
-            stores = data["context"]["dispatcher"]["stores"]
-        except Exception as e:
-            print("Failed, missing stores in %s bytes from '%s': %s" % (storekey, len(str(data)), url, e), file=sys.stderr)
-            raise
+
+        if self._cache.get(url):
+            if isinstance(self._cache[url], Exception):
+                raise self._cache[url]
+            else:
+                stores = self._cache[url]
+        else:
+            self._cache[url] = stores
+
         if DEBUG > 2:
             trace('stores: %s' % (stores,))
         else:
             trace('stores: x%d' % (len(stores),))
         return stores
+
 
     # Private static method to determine if a numerical value is in the data object being cleaned
     @staticmethod
@@ -603,6 +730,11 @@ class YahooFinanceETL(object):
         form_data_list = self._reformat_stmt_data_process(raw_data[ticker], statement_type)
         return {ticker: form_data_list}
 
+    # Public method to clear the cache
+    def cache_clear(self):
+        self._cache.clear()
+        _url_cache.clear()
+
     # Public method to get time interval code
     def get_time_code(self, time_interval):
         interval_code = self._INTERVAL_DICT[time_interval.lower()]
@@ -634,7 +766,7 @@ class YahooFinanceETL(object):
                         with open('/tmp/%s-%s.log' % (now[:8], tick), 'a+') as f:
                             print("Warning! Ticker: %s: %s" % (tick, exc), file=f)
                             print(f"get_stock_data({statement_type!r}, {tech_type!r}, {report_name!r}, ...)", file=f)
-                            for eurl, edata in self._cache.items():
+                            for eurl, edata in (e for e in self._cache.items() if isinstance(e, Exception)):
                                 f.write('%s\nts: %s\nkey: %s\nurl: %s\ninfo: %s\ndata:\n%s\n' % (
                                     sep, now, eurl,
                                     edata.url if edata.data else 'none',
