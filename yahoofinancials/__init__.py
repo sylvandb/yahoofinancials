@@ -102,15 +102,19 @@ _VARIANCE = 2
 
 # track the last get timestamp to add a minimum delay between gets - be nice!
 _lastget = 0
+_niceeven = False
 def _be_nice():
-    global _lastget
-    now = int(time.time())
+    global _lastget, _niceeven
+    now = time.time()
     if _lastget:
         elapsed = now - _lastget
-        this_delay = max(_MIN_DELAY, _MIN_INTERVAL - elapsed - _VARIANCE + random.randint(0, 2 * _VARIANCE))
-        if TIME_REPORT: print("\nelapsed: %s, delay: %s" % (elapsed, this_delay), file=sys.stderr, end='')
+        this_delay = round(_MIN_INTERVAL - elapsed - _VARIANCE + (random.random() * 2 * _VARIANCE), 2)
+        this_delay = max(_MIN_DELAY, this_delay)
+        this_delay = this_delay / (_niceeven + 1)
+        if TIME_REPORT: print(f"\n{now:.3f} elapsed: {elapsed:.3f}, delay: {this_delay:.3f}", file=sys.stderr, end='')
         time.sleep(this_delay)
-        now = int(time.time())
+        now = time.time()
+    _niceeven = not _niceeven
     _lastget = now
 
 
@@ -177,6 +181,7 @@ reset_headers()
 def fetch_url(url):
     global _MIN_INTERVAL, _lastget
     trace()
+    _be_nice()
     try:
         r = time_report(requests.get, url, headers=HEADERS, timeout=READ_TIMEOUT)
     except (requests.Timeout, requests.HTTPError) as e:
@@ -252,7 +257,6 @@ class YahooFinanceETL(object):
     def _scrape_data(self, url):
         if not self._cache.get(url):
             rescode = 0
-            _be_nice()
             # Try to open the URL multiple times sleeping random time between tries
             for tries in range(READ_TRIES):
                 if rescode == 404:
@@ -458,7 +462,6 @@ class YahooFinanceETL(object):
     # Private Method to get financial data via API Call
     def _get_api_data(self, api_url):
         json_content = None
-        _be_nice()
         for tries in range(READ_TRIES):
             if tries:
                 time.sleep(random.randrange(10, 20))
