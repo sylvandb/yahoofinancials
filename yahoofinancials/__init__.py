@@ -136,7 +136,7 @@ _VARIANCE = 2
 _interval = _MIN_INTERVAL
 _lastget = 0
 _niceeven = False
-def _be_nice():
+def _be_nice(activitycb):
     global _lastget, _niceeven
     now = time.time()
     if _lastget:
@@ -146,10 +146,15 @@ def _be_nice():
         this_delay = this_delay / (_niceeven + 1)
         if TIME_REPORT: print(f"\n{now:.3f} elapsed: {elapsed:.3f}, delay: {this_delay:.3f}", file=sys.stderr, end='')
         if SEE_FETCH:   print(f"\n{now:.3f} elapsed: {elapsed:.3f}, delay: {this_delay:.3f}")
+        while this_delay > 1.5:
+            time.sleep(1.5)
+            this_delay -= 1.5
+            activitycb(0)
         time.sleep(this_delay)
         now = time.time()
     _niceeven = not _niceeven
     _lastget = now
+    activitycb(0)
 
 
 def time_report(f, *a, **kwa):
@@ -292,15 +297,16 @@ def _fetch_stats(start=False, err=None, url=None, cached=False):
             print(' '.join(report), file=outfile)
             print('\n'.join(fetch_stats_hist_as_str()), file=outfile)
 
-def fetch_url(url):
+def fetch_url(url, activitycb):
     trace()
     try:
         r = _url_cache[url]
         _fetch_stats(cached=True)
+        activitycb()
         return r
     except KeyError:
         pass
-    _be_nice()
+    _be_nice(activitycb)
     if SEE_FETCH: print(f"  fetch_url({url})")
     _fetch_stats(start=True)
     try:
@@ -314,6 +320,7 @@ def fetch_url(url):
         _url_cache[url] = (r.status_code, r.text)
     else:
         _fetch_stats(url=url, err='HTTP_%s' % (r.status_code,))
+    activitycb()
     return r.status_code, r.text
 
 
@@ -331,8 +338,9 @@ class URLOpenException(ManagedException):
 # Class containing Yahoo Finance ETL Functionality
 class YahooFinanceETL(object):
 
-    def __init__(self, ticker):
+    def __init__(self, ticker, activity_callback=None):
         self.ticker = [ticker.upper()] if isinstance(ticker, str) else [t.upper() for t in ticker]
+        self.activitycb = activity_callback or (lambda x=None: None)
         self._cache = {}
 
     # Meta-data dictionaries for the classes to use
@@ -386,7 +394,7 @@ class YahooFinanceETL(object):
                     continue
                 if tries:
                     time.sleep(random.randrange(10, 20))
-                rescode, response_content = fetch_url(url)
+                rescode, response_content = fetch_url(url, self.activitycb)
                 trace('rescode=%s' % rescode)
                 if rescode == 200:
                     soup = BeautifulSoup(response_content, "html.parser")
@@ -592,7 +600,7 @@ class YahooFinanceETL(object):
         for tries in range(READ_TRIES):
             if tries:
                 time.sleep(random.randrange(10, 20))
-            rescode, res_content = fetch_url(api_url)
+            rescode, res_content = fetch_url(api_url, self.activitycb)
             try:
                 if rescode == 200:
                     json_content = loads(res_content.decode('utf-8'))
