@@ -209,6 +209,9 @@ HEADERS = {}
 reset_headers()
 
 
+# this cache holds data from urls
+# cached data is used when one in a group fails
+# otherwise usually the self._cache in the class - it's alread parsed
 _url_cache = {}
 _fstats = {
     'pass': {
@@ -378,65 +381,73 @@ class YahooFinanceETL(object):
         date_utc = date_eastern.astimezone(utc)
         return date_utc.strftime('%Y-%m-%d %H:%M:%S %Z%z')
 
-    # Private method to scrape data from yahoo finance
-    def _scrape_data(self, url):
-        if not self._cache.get(url):
+    # Private method to parse page content from yahoo finance
+    def _parse_finance(self, url, content):
+        soup = BeautifulSoup(content, "html.parser")
+        re_script = soup.find("script", text=re.compile("root.App.main"))
+        if re_script is None:
+            # no point in trying this over and over again so remember the parse failure
+            self._cache[url] = ParseException(
+                    "Parse error, no script in server response %d bytes from url: %s" % (
+                    len(content), url))
+            self._cache[url].data = content
+            raise self._cache[url]
+        # bs4 4.9.0 changed so text from scripts is no longer considered text
+        script = re_script.text or re_script.string
+        data = loads(re.search("root.App.main\s+=\s+(\{.*\})", script).group(1))
+        try:
+            self._cache[url] = data["context"]["dispatcher"]["stores"]
+        except Exception as e:
+            # no point in trying this over and over again so remember the parse failure
+            self._cache[url] = ParseException(
+                    "Failed, missing stores in %s bytes from '%s': %s" % (storekey, len(str(data)), url, e))
+            self._cache[url].data = str(data)
+            raise self._cache[url]
 
-            rescode = 0
-            # Try to open the URL multiple times sleeping random time between tries
-            for tries in range(READ_TRIES):
-                if rescode == 404:
-                    # won't succeed, run out the tries
-                    continue
-                if tries:
-                    time.sleep(random.randrange(10, 20))
-                rescode, response_content = fetch_url(url, self.activitycb)
-                trace('rescode=%s' % rescode)
-                if rescode == 200:
-                    soup = BeautifulSoup(response_content, "html.parser")
-                    re_script = soup.find("script", text=re.compile("root.App.main"))
-                    if re_script is None:
-                        # no point in trying this over and over again so remember the parse failure
-                        self._cache[url] = ParseException(
-                                "Parse error, server response %d bytes while opening the url: %s" % (
-                                len(response_content), url))
-                        self._cache[url].url = url
-                        self._cache[url].info = 'none-ok' #response.info()
-                        self._cache[url].data = response_content
-                        break
-                    # bs4 4.9.0 changed so text from scripts is no longer considered text
-                    script = re_script.text or re_script.string
-                    data = loads(re.search("root.App.main\s+=\s+(\{.*\})", script).group(1))
-                    try:
-                        stores = data["context"]["dispatcher"]["stores"]
-                    except Exception as e:
-                        # no point in trying this over and over again so remember the parse failure
-                        self._cache[url] = ParseException(
-                                "Failed, missing stores in %s bytes from '%s': %s" % (storekey, len(str(data)), url, e))
-                        self._cache[url].url = url
-                        self._cache[url].info = 'none-ok'
-                        self._cache[url].data = str(data)
-                    break
-                print("Fail try %d, code %d from %s" % (tries + 1, rescode, url), file=sys.stderr)
-            else:
-                print("Failed, code %d from %s" % (rescode, url), file=sys.stderr)
-                # Raise a custom exception if we can't get the web page
-                # exhausted all the tries so remember this failure
-                self._cache[url] = URLOpenException(
-                        "Server replied with HTTP %d code while opening the url: %s" % (
-                        rescode, url))
+    # Private method to fetch and parse yahoo finance page
+    def _fetch_finance(self, url):
+        # Try to open the URL multiple times sleeping random time between tries
+        rescode = 0
+        for tries in range(READ_TRIES):
+            if rescode == 404:
+                # not found last time, won't succeed this time, run out the tries
+                continue
+            if tries:
+                # this is a retry, don't hammer the server
+                time.sleep((2 ** tries) / 2 + random.randrange(1, 5))
+            rescode, response_content = fetch_url(url, self.activitycb)
+            trace('rescode=%s' % rescode)
+            if rescode == 200:
+                self._parse_finance(url, response_content)
+                break
+            print("Fail try %d, code %d from %s" % (tries + 1, rescode, url), file=sys.stderr)
+        else:
+            print("Failed, code %d from %s" % (rescode, url), file=sys.stderr)
+            # Raise a custom exception if we can't get the web page
+            # exhausted all the tries so remember this failure
+            self._cache[url] = URLOpenException(
+                    "Server replied with HTTP %d code while opening the url: %s" % (
+                    rescode, url))
+            self._cache[url].data = "HTTP %d" % (rescode,)
+            raise self._cache[url]
+
+    # Private method to scrape data from yahoo finance
+    def _scrape_finance(self, url):
+        #print(f"scraping: {url!r}")
+        if not self._cache.get(url):
+            try:
+                self._fetch_finance(url)
+            except URLOpenException:
                 self._cache[url].url = url
                 self._cache[url].info = 'none'
-                self._cache[url].data = "HTTP %d" % (rescode,)
+            except ParseException:
+                self._cache[url].url = url
+                self._cache[url].info = 'none-ok'
 
-        if self._cache.get(url):
-            if isinstance(self._cache[url], Exception):
-                raise self._cache[url]
-            else:
-                stores = self._cache[url]
-        else:
-            self._cache[url] = stores
+        if isinstance(self._cache[url], Exception):
+            raise self._cache[url]
 
+        stores = self._cache[url]
         if DEBUG > 2:
             trace('stores: %s' % (stores,))
         else:
@@ -669,7 +680,7 @@ class YahooFinanceETL(object):
                 cleaned_re_data = self._recursive_api_request(hist_obj, up_ticker)
             except KeyError:
                 try:
-                    re_data = self._scrape_data(yahoo_url)["HistoricalPriceStore"]
+                    re_data = self._scrape_finance(yahoo_url)["HistoricalPriceStore"]
                     cleaned_re_data = self._clean_historical_data(re_data)
                 except KeyError:
                     cleaned_re_data = None
@@ -677,9 +688,8 @@ class YahooFinanceETL(object):
         else:
             yahoo_url = self._BASE_YAHOO_URL + up_ticker + '/' +\
                 self.YAHOO_FINANCIAL_TYPES[statement_type][0] + '?p=' + up_ticker
-            #print(f"scraping: {yahoo_url!r}")
             try:
-                re_data = time_report(self._scrape_data, yahoo_url)["QuoteSummaryStore"]
+                re_data = time_report(self._scrape_finance, yahoo_url)["QuoteSummaryStore"]
             except KeyError:
                 re_data = None
             try:
