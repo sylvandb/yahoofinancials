@@ -135,24 +135,20 @@ _VARIANCE = 2
 # track the last get timestamp to add a minimum delay between gets - be nice!
 _interval = _MIN_INTERVAL
 _lastget = 0
-_niceeven = False
 def _be_nice(activitycb):
-    global _lastget, _niceeven
+    global _lastget
     now = time.time()
     if _lastget:
         elapsed = now - _lastget
         this_delay = round(_interval - elapsed - _VARIANCE + (random.random() * 2 * _VARIANCE), 2)
         this_delay = max(_MIN_DELAY, this_delay)
-        this_delay = this_delay / (_niceeven + 1)
         if TIME_REPORT: print(f"\n{now:.3f} elapsed: {elapsed:.3f}, delay: {this_delay:.3f}", file=sys.stderr, end='')
         if SEE_FETCH:   print(f"\n{now:.3f} elapsed: {elapsed:.3f}, delay: {this_delay:.3f}")
-        while this_delay > 1.5:
-            time.sleep(1.5)
-            this_delay -= 1.5
+        now += this_delay
+        while (now - time.time()) > 1.5:
+            time.sleep(1.1)
             activitycb(0)
-        time.sleep(this_delay)
-        now = time.time()
-    _niceeven = not _niceeven
+        time.sleep(max(0, now - time.time()))
     _lastget = now
     activitycb(0)
 
