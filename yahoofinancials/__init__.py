@@ -161,38 +161,45 @@ def time_report(f, *a, **kwa):
     return rv
 
 
-if DEBUG:
-    import inspect
-    import traceback
+def set_debug(n=None):
+    global DEBUG, trace
+    if n is not None:
+        print(f'set_debug({n})')
+        DEBUG = int(n)
+    if DEBUG:
+        import inspect
+        import traceback
 
-    _tracefargs = []
-    def trace(*args):
-        fname = traceback.extract_stack(None, 2)[0][2]
-        fargnames, _, _, flocals = inspect.getargvalues(inspect.currentframe().f_back)
-        fargs = ['%s=%s' % (a, flocals[a]) for a in fargnames]
-        if fargs == _tracefargs:
-            fargs = ['...']
-        else:
-            del _tracefargs[:]
-            _tracefargs.extend(fargs)
-        if DEBUG > 9:
-            print("%s(%r)\n :  %s" % (
-                fname,
-                ', '.join(fargs),
-                '\n :  '.join(args),
-                ), file=sys.stderr)
-        elif DEBUG > 1:
-            print("%s(%r)" % (
-                fname,
-                ', '.join(fargs),
-                ), file=sys.stderr)
-        else:
-            print("%s(...x%d...)" % (
-                fname,
-                len(fargs),
-                ), file=sys.stderr)
-else:
-    def trace(*args): pass
+        _tracefargs = []
+        def trace(*args):
+            fname = traceback.extract_stack(None, 2)[0][2]
+            fargnames, _, _, flocals = inspect.getargvalues(inspect.currentframe().f_back)
+            fargs = ['%s=%s' % (a, flocals[a]) for a in fargnames]
+            if fargs == _tracefargs:
+                fargs = ['...']
+            else:
+                del _tracefargs[:]
+                _tracefargs.extend(fargs)
+            if DEBUG > 9:
+                print("%s(%r)\n :  %s" % (
+                    fname,
+                    ', '.join(fargs),
+                    '\n :  '.join(args),
+                    ), file=sys.stderr)
+            elif DEBUG > 1:
+                print("%s(%r)" % (
+                    fname,
+                    ', '.join(fargs),
+                    ), file=sys.stderr)
+            else:
+                print("%s(...x%d...)" % (
+                    fname,
+                    len(fargs),
+                    ), file=sys.stderr)
+        if DEBUG > 5: SEE_FETCH = True
+    else:
+        def trace(*args): pass
+set_debug()
 
 
 def reset_headers():
@@ -433,18 +440,21 @@ class YahooFinanceETL(object):
 
     # Private method to scrape data from yahoo finance
     def _scrape_finance(self, url):
-        #print(f"scraping: {url!r}")
+        #print(f"scraping: {DEBUG} - {url!r}")
         if not self._cache.get(url):
             try:
                 self._fetch_finance(url)
-            except URLOpenException:
+            except URLOpenException as e:
+                trace('URLOpenException: %s' % e)
                 self._cache[url].url = url
                 self._cache[url].info = 'none'
-            except ParseException:
+            except ParseException as e:
+                trace('ParseException: %s' % e)
                 self._cache[url].url = url
                 self._cache[url].info = 'none-ok'
 
         if isinstance(self._cache[url], Exception):
+            trace('URLException: %s' % self._cache[url])
             raise self._cache[url]
 
         stores = self._cache[url]
