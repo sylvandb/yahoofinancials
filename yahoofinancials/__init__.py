@@ -213,13 +213,18 @@ def _decrypt(data):
     salt = encrypted[8:16]
     encrypted = encrypted[16:]
 
-    _cs = data["_cs"]
-    _crdata = loads(data["_cr"])
-    _crwords = _crdata["words"]
-    _cr = b"".join(int.to_bytes(i, length=4, byteorder="big", signed=True) for i in _crwords)
-    assert _crdata["sigBytes"] == len(_cr)
-
-    password = hashlib.pbkdf2_hmac("sha1", _cs.encode("utf8"), _cr, 1, dklen=32).hex()
+    try:
+        # obfuscated password
+        _cs = data["_cs"]
+        _crdata = loads(data["_cr"])
+    except KeyError:
+        # direct password
+        password = next(v for k, v in data.items() if k not in ('context', 'plugins',))
+    else:
+        _crwords = _crdata["words"]
+        _cr = b"".join(int.to_bytes(i, length=4, byteorder="big", signed=True) for i in _crwords)
+        assert _crdata["sigBytes"] == len(_cr)
+        password = hashlib.pbkdf2_hmac("sha1", _cs.encode("utf8"), _cr, 1, dklen=32).hex()
     key, iv = EVPKDF(password, salt, keySize=32, ivSize=16, iterations=1, hashAlgorithm="md5")
     cipher = AES.new(key, AES.MODE_CBC, IV=iv)
     plaintext = cipher.decrypt(encrypted)
