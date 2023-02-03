@@ -26,65 +26,23 @@ from .fetchurl import _fetch_url
 # decrypt encrypted responses 20221221
 # from https://github.com/ranaroussi/yfinance/issues/1246#issuecomment-1356709536
 def decrypt(data, *pw_args):
-
     if data[:3] != 'U2F':
         return data
-
     password = _find_enckey(*pw_args)
-
-    def EVPKDF(
-        password,
-        salt,
-        keySize=32,
-        ivSize=16,
-        iterations=1,
-        hashAlgorithm="md5",
-    ) -> tuple:
-        """OpenSSL EVP Key Derivation Function
-        Args:
-            password (Union[str, bytes, bytearray]): Password to generate key from.
-            salt (Union[bytes, bytearray]): Salt to use.
-            keySize (int, optional): Output key length in bytes. Defaults to 32.
-            ivSize (int, optional): Output Initialization Vector (IV) length in bytes. Defaults to 16.
-            iterations (int, optional): Number of iterations to perform. Defaults to 1.
-            hashAlgorithm (str, optional): Hash algorithm to use for the KDF. Defaults to 'md5'.
-        Returns:
-            key, iv: Derived key and Initialization Vector (IV) bytes.
-        Taken from: https://gist.github.com/rafiibrahim8/0cd0f8c46896cafef6486cb1a50a16d3
-        OpenSSL original code: https://github.com/openssl/openssl/blob/master/crypto/evp/evp_key.c#L78
-        """
-        assert iterations > 0, "Iterations can not be less than 1."
-        if isinstance(password, str):
-            password = password.encode("utf-8")
-        final_length = keySize + ivSize
-        key_iv = b""
-        block = None
-        while len(key_iv) < final_length:
-            hasher = hashlib.new(hashAlgorithm)
-            if block:
-                hasher.update(block)
-            hasher.update(password)
-            hasher.update(salt)
-            block = hasher.digest()
-            for _ in range(1, iterations):
-                block = hashlib.new(hashAlgorithm, block).digest()
-            key_iv += block
-        key, iv = key_iv[:keySize], key_iv[keySize:final_length]
-        return key, iv
-
     encrypted = b64decode(data)
     assert encrypted[:8] == b"Salted__"
     salt = encrypted[8:16]
-    encrypted = encrypted[16:]
-
-    key, iv = EVPKDF(password, salt, keySize=32, ivSize=16, iterations=1, hashAlgorithm="md5")
+    key, iv = _EVPKDF(password, salt, keySize=32, ivSize=16, iterations=1, hashAlgorithm="md5")
     cipher = AES.new(key, AES.MODE_CBC, IV=iv)
-    plaintext = cipher.decrypt(encrypted)
+    plaintext = cipher.decrypt(encrypted[16:])
     plaintext = unpad(plaintext, 16, style="pkcs7")
     return loads(plaintext)
 
 
+
 def _find_enckey(data_obj, soup):
+    # data_obj is the object from the original file
+    # soup is the original file as a beautiful soup object
 
     # original obfuscated enc key
     try:
@@ -164,6 +122,48 @@ def _clean_sl(s):
         .replace('concat(', '').replace(')', '') \
         .replace('t.', '') \
         .replace('t["', '').replace('"]', '')
+
+
+
+def _EVPKDF(
+    password,
+    salt,
+    keySize=32,
+    ivSize=16,
+    iterations=1,
+    hashAlgorithm="md5",
+) -> tuple:
+    """OpenSSL EVP Key Derivation Function
+    Args:
+        password (Union[str, bytes, bytearray]): Password to generate key from.
+        salt (Union[bytes, bytearray]): Salt to use.
+        keySize (int, optional): Output key length in bytes. Defaults to 32.
+        ivSize (int, optional): Output Initialization Vector (IV) length in bytes. Defaults to 16.
+        iterations (int, optional): Number of iterations to perform. Defaults to 1.
+        hashAlgorithm (str, optional): Hash algorithm to use for the KDF. Defaults to 'md5'.
+    Returns:
+        key, iv: Derived key and Initialization Vector (IV) bytes.
+    Taken from: https://gist.github.com/rafiibrahim8/0cd0f8c46896cafef6486cb1a50a16d3
+    OpenSSL original code: https://github.com/openssl/openssl/blob/master/crypto/evp/evp_key.c#L78
+    """
+    assert iterations > 0, "Iterations can not be less than 1."
+    if isinstance(password, str):
+        password = password.encode("utf-8")
+    final_length = keySize + ivSize
+    key_iv = b""
+    block = None
+    while len(key_iv) < final_length:
+        hasher = hashlib.new(hashAlgorithm)
+        if block:
+            hasher.update(block)
+        hasher.update(password)
+        hasher.update(salt)
+        block = hasher.digest()
+        for _ in range(1, iterations):
+            block = hashlib.new(hashAlgorithm, block).digest()
+        key_iv += block
+    key, iv = key_iv[:keySize], key_iv[keySize:final_length]
+    return key, iv
 
 
 
