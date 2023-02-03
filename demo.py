@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/bin/env python3
 
 """
 %(scriptname)s [-h|--help] [api [api [...]]] [ticker [ticker [...]]]
