@@ -26,9 +26,12 @@ except ImportError:
         from cryptography.hazmat.primitives import padding
         from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
-
-from .exceptions import DecryptException
-from .fetchurl import _fetch_url
+try:
+    from .exceptions import DecryptException
+    from .fetchurl import _fetch_url, _debug
+except ImportError:
+    from exceptions import DecryptException
+    from fetchurl import _fetch_url, _debug
 
 
 
@@ -106,18 +109,20 @@ def _find_enckey(data_obj, soup):
     # find and download main.js and look for 4 keys holding the enc key
     prefix = "https://s.yimg.com/uc/finance/dd-site/js/main."
     for url in (tag['src'] for tag in soup.find_all('script') if tag.get('src', '').startswith(prefix)):
+        if _debug(): print('main url:', url, file=sys.stderr)
         status_code, content = _fetch_url(url)
         if status_code == 200:
-            mainjs = content.decode("utf8")
+            mainjs = content
             for dpstore in (x.group() for x in re.finditer(_dpregex, mainjs)):
                 sublist = [x.group() for x in re.finditer(_slregex, dpstore)][:5]
-                #print(f'look dp: {dpstore}')
-                #print(f'look sl: {sublist}')
                 keys = [_clean_sl(sl) for sl in sublist]
-                #print(f'look ky: {keys}')
+                if _debug():
+                    print(f'look dp: {dpstore}', file=sys.stderr)
+                    print(f'look sl: {sublist}', file=sys.stderr)
+                    print(f'look ky: {keys}', file=sys.stderr)
                 parts = [data_obj.get(k) for k in keys]
                 if len(parts) == 4 and all(parts):
-                    print('unverified 4 from main.js', file=sys.stderr)
+                    if _debug(): print('unverified 4 from main.js', file=sys.stderr)
                     return ''.join(parts)
             time.sleep(randrange(10, 20))
 
@@ -187,13 +192,18 @@ if __name__ == '__main__':
 
     from bs4 import BeautifulSoup
 
+    try:
+        ticker = sys.argv[1]
+    except IndexError:
+        #ticker = 'lmt'
+        ticker = 'mmm'
 
-    with open('lmt.html', 'r') as f:
+    with open(f'{ticker}.html', 'r') as f:
         page = f.read()
 
-    with open('lmt-main.js', 'r') as f:
-        mainjs = f.read().encode()
-        #mainjs = content.encode()
+    with open(f'{ticker}-main.js', 'r') as f:
+        mainjs = f.read()
+        #mainjs = content
 
 
     def _fetch_url(u):
@@ -207,4 +217,5 @@ if __name__ == '__main__':
     data_obj = loads(re.search("root.App.main\s+=\s+(\{.*\})", script).group(1))
     datastore = data_obj["context"]["dispatcher"]["stores"]
     store = decrypt(datastore, data_obj, soup)
+    print(f"decrypted {len(datastore)} bytes to {len(store)} {type(store)} ({len(str(store))} as str).")
 

@@ -47,3 +47,6 @@ from .exceptions import ManagedException, ParseException, URLOpenException, Decr
 from .fetchurl import VERSTR, \
     fetch_stats, fetch_stats_hist_as_str, \
     set_debug, reset_headers
+
+
+BROKEN = True

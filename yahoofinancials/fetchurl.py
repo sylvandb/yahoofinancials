@@ -1,6 +1,7 @@
 from os import environ
 import random
 import requests
+import sys
 from time import sleep, time
 
 # meh
@@ -261,8 +262,12 @@ def _fetch_stats(start=False, err=None, url=None, cached=False):
             print('\n'.join(fetch_stats_hist_as_str()), file=outfile)
 
 
-def _fetch_url(url, activitycb):
+def _dummy_cb(*a, **ka):
+    pass
+
+def _fetch_url(url, activitycb=None):
     trace()
+    activitycb = activitycb or _dummy_cb
     try:
         r = _url_cache[url]
         _fetch_stats(cached=True)
