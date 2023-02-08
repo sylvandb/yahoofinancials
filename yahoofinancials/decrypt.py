@@ -1,5 +1,8 @@
 # decrypt encrypted responses ca 20221221
+# from https://github.com/ranaroussi/yfinance/issues/1246#issuecomment-1356709536
+#
 # handle hidden encryption key 20230116, 20230123, 20230126
+# from https://github.com/JECSand/yahoofinancials
 
 from json import loads
 from random import randrange
@@ -10,12 +13,18 @@ import time
 from base64 import b64decode
 import hashlib
 try:
+    _UsingCryptodome = True
     from Cryptodome.Cipher import AES
     from Cryptodome.Util.Padding import unpad
 except ImportError:
-    # Cryptodome installed by another name
-    from Crypto.Cipher import AES
-    from Crypto.Util.Padding import unpad
+    try:
+        # Cryptodome installed by another name
+        from Crypto.Cipher import AES
+        from Crypto.Util.Padding import unpad
+    except ImportError:
+        _UsingCryptodome = False
+        from cryptography.hazmat.primitives import padding
+        from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
 
 from .exceptions import DecryptException
@@ -23,8 +32,6 @@ from .fetchurl import _fetch_url
 
 
 
-# decrypt encrypted responses 20221221
-# from https://github.com/ranaroussi/yfinance/issues/1246#issuecomment-1356709536
 def decrypt(data, *pw_args):
     if data[:3] != 'U2F':
         return data
@@ -33,11 +40,21 @@ def decrypt(data, *pw_args):
     assert encrypted[:8] == b"Salted__"
     salt = encrypted[8:16]
     key, iv = _EVPKDF(password, salt, keySize=32, ivSize=16, iterations=1, hashAlgorithm="md5")
-    cipher = AES.new(key, AES.MODE_CBC, IV=iv)
-    plaintext = cipher.decrypt(encrypted[16:])
-    plaintext = unpad(plaintext, 16, style="pkcs7")
-    return loads(plaintext)
+    return loads(_decrypt(encrypted[16:], key, iv))
 
+
+
+if _UsingCryptodome:
+    def _decrypt(ciphertext, key, iv):
+        cipher = AES.new(key, AES.MODE_CBC, IV=iv)
+        plaintext = cipher.decrypt(ciphertext)
+        return unpad(plaintext, 16, style="pkcs7")
+else:
+    def _decrypt(ciphertext, key, iv):
+        decryptor = Cipher(algorithms.AES(key), modes.CBC(iv)).decryptor()
+        plaintext = decryptor.update(ciphertext) + decryptor.finalize()
+        unpadder = padding.PKCS7(128).unpadder()
+        return (unpadder.update(plaintext) + unpadder.finalize()).decode("utf-8")
 
 
 def _find_enckey(data_obj, soup):
@@ -67,8 +84,6 @@ def _find_enckey(data_obj, soup):
     else:
         if len(parts) == 1 and all(parts):
             return ''.join(parts)
-
-    # from JECSand
 
     # enc key as data in the only 4 keys after 'plugins'
     try:
