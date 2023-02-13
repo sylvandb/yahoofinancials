@@ -1,2 +1,4 @@
 *.pyc
-yahoofinancials/__pycache__
+__pycache__
+test/yahoofinancials
+yahoofinancials/.keys.txt*

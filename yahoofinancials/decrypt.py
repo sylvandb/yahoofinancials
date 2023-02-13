@@ -1,10 +1,10 @@
+#!/usr/bin/env python3
 # decrypt encrypted responses ca 20221221
 # from https://github.com/ranaroussi/yfinance/issues/1246#issuecomment-1356709536
-#
-# handle hidden encryption key 20230116, 20230123, 20230126
-# from https://github.com/JECSand/yahoofinancials
+# depends on key being stored as the last line in .keys.txt
 
 from json import loads
+import os
 from random import randrange
 import re
 import sys
@@ -34,6 +34,9 @@ except ImportError:
     from fetchurl import _fetch_url, _debug
 
 
+KEYFILE = '.keys.txt'
+KEYPATH = f"{os.path.dirname(__file__)}/{KEYFILE}"
+
 
 def decrypt(data, *pw_args):
     if data[:3] != 'U2F':
@@ -60,72 +63,16 @@ else:
         return (unpadder.update(plaintext) + unpadder.finalize()).decode("utf-8")
 
 
-def _find_enckey(data_obj, soup):
-    # data_obj is the object from the original file
-    # soup is the original file as a beautiful soup object
-
-    # original obfuscated enc key
+def _find_enckey(*na, **kna):
     try:
-        _cs = data_obj["_cs"]
-        _crdata = loads(data_obj["_cr"])
-    except KeyError:
-        pass
-    else:
-        _crwords = _crdata["words"]
-        _cr = b"".join(int.to_bytes(i, length=4, byteorder="big", signed=True) for i in _crwords)
-        assert _crdata["sigBytes"] == len(_cr)
-        return hashlib.pbkdf2_hmac("sha1", _cs.encode("utf8"), _cr, 1, dklen=32).hex()
-
-    # enc key in a single unexpected key
-    #print('all %d keys: %r' % (len(data_obj), data_obj.keys(),))
-    # over 10,000 random-looking keys with data! yahoo why you waste my bandwidth???
-    parts = []
-    for v in (v for k, v in data_obj.items() if k not in ('context', 'plugins',)):
-        if parts:
-            break
-        parts.append(v)
-    else:
-        if len(parts) == 1 and all(parts):
-            return ''.join(parts)
-
-    # enc key as data in the only 4 keys after 'plugins'
-    try:
-        del data_obj['context']
-    except KeyError:
-        pass
-    keys = list(data_obj.keys())
-    try:
-        plugins = keys.index('plugins')
-    except ValueError:
-        pass
-    else:
-        # limit to max 5 for efficiency and error checking
-        keys = keys[plugins + 1 : plugins + 6]
-        #print('keys: %r' % (keys,))
-        parts = [data_obj.get(k) for k in keys]
-        if len(parts) == 4 and all(parts):
-            return ''.join(parts)
-
-    # find and download main.js and look for 4 keys holding the enc key
-    prefix = "https://s.yimg.com/uc/finance/dd-site/js/main."
-    for url in (tag['src'] for tag in soup.find_all('script') if tag.get('src', '').startswith(prefix)):
-        if _debug(): print('main url:', url, file=sys.stderr)
-        status_code, content = _fetch_url(url)
-        if status_code == 200:
-            mainjs = content
-            for dpstore in (x.group() for x in re.finditer(_dpregex, mainjs)):
-                sublist = [x.group() for x in re.finditer(_slregex, dpstore)][:5]
-                keys = [_clean_sl(sl) for sl in sublist]
-                if _debug():
-                    print(f'look dp: {dpstore}', file=sys.stderr)
-                    print(f'look sl: {sublist}', file=sys.stderr)
-                    print(f'look ky: {keys}', file=sys.stderr)
-                parts = [data_obj.get(k) for k in keys]
-                if len(parts) == 4 and all(parts):
-                    if _debug(): print('unverified 4 from main.js', file=sys.stderr)
-                    return ''.join(parts)
-            time.sleep(randrange(10, 20))
-
+        with open(KEYPATH, 'rb') as f:
+            # don't read more than 1000 chars
+            f.seek(-min(1000, f.seek(0, 2)), 2)
+            keys = f.readlines()
+    except Exception as e:
+        raise DecryptException(str(e))
+    if keys:
+        return keys[-1].strip() or keys[-2].strip()
     raise DecryptException('No enc key')
 
 
