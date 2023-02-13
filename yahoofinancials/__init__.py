@@ -49,4 +49,4 @@ from .fetchurl import VERSTR, \
     set_debug, reset_headers
 
 
-BROKEN = True
+BROKEN = False
