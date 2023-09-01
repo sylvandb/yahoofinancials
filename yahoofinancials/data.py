@@ -250,10 +250,12 @@ class YahooFinanceData(object):
     def _get_historical_data(self, url, config, tech_type, statement_type):
         global _lastget
         if not self._cache.get(url):
-            now = int(time.time())
-            if _lastget and now - _lastget < self._MIN_INTERVAL:
-                time.sleep(self._MIN_INTERVAL - (now - _lastget) + 1)
-                now = int(time.time())
+            self._MIN_INTERVAL = abs(self._MIN_INTERVAL)
+            now = time.time()
+            delta = now - _lastget
+            if _lastget and delta < self._MIN_INTERVAL:
+                time.sleep(self._MIN_INTERVAL - delta + min(1, self._MIN_INTERVAL))
+                now = time.time()
             _lastget = now
             self._request_handler(url, config.get("response_field"))
         data = self._cache[url]
