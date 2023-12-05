@@ -126,15 +126,28 @@ class TimeoutHTTPAdapter(HTTPAdapter):
         return super(TimeoutHTTPAdapter, self).send(request, **kwargs)
 
 
+lastsession = crumb = None
+
 def setup_session_with_cookies_and_crumb(session: Session):
+    global lastsession, crumb
+    if lastsession and crumb:
+        return lastsession, crumb
+    crumb = None
     headers = {**random.choice(HEADERS)}
     session.headers = headers
     try:
-        response = session.get('https://fc.yahoo.com')
-    except Exception:
+        # url change hint from by https://github.com/dpguthrie/yahooquery/issues/241
+        # use stream to avoid downloading the entire page
+        # (does stream allow enough to read the cookies from the server?)
+        # inside context to close the connection
+        with session.get('https://finance.yahoo.com/', stream=True) as response:
+            session.cookies = response.cookies
+    except Exception as e:
+        print('ERROR session failed:', e)
+        raise
         return session, None
     else:
-        session.cookies = response.cookies
+        lastsession = session
         crumb = _get_crumb(session)
         return session, crumb
 
@@ -145,6 +158,8 @@ def _get_crumb(session):
         return response.text
     except (ConnectionError, RetryError) as e:
         # Cookies most likely not set in previous request
+        print('ERROR crumb failed:', e)
+        raise
         return None
 
 
