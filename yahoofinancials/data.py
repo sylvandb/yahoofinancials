@@ -10,7 +10,7 @@ import pytz
 import requests as requests
 
 from yahoofinancials.maps import COUNTRY_MAP, REQUEST_MAP, USER_AGENTS
-from yahoofinancials.sessions import _init_session
+from yahoofinancials.sessions import init_session
 from yahoofinancials.utils import remove_prefix, get_request_config, get_request_category
 
 # track the last get timestamp to add a minimum delay between gets - be nice!
@@ -68,7 +68,7 @@ class YahooFinanceData(object):
         self.proxies = kwargs.get("proxies")
         self.flat_format = kwargs.get("flat_format", False)
         self._cache = {}
-        self.session, self.crumb = _init_session(kwargs.pop("session", None), **kwargs)
+        self.session, self.crumb = init_session(kwargs.pop("session", None), **kwargs)
 
     # Minimum interval between Yahoo Finance requests for this instance
     _MIN_INTERVAL = 7

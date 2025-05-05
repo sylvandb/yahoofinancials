@@ -1,13 +1,25 @@
+#!/usr/bin/env python3
 import random
 from urllib3.util import Retry
 from requests import Session
-from requests.adapters import HTTPAdapter
 from requests.exceptions import ConnectionError, RetryError
 
 
 DEFAULT_TIMEOUT = 5
 
 HEADERS = [
+    { # crumb worked 20250508! https://github.com/ranaroussi/yfinance/issues/2297
+        'User-Agent':
+            'Mozilla/4.0 (compatible; MSIE 6.0; Windows NT 5.2; .NET CLR 1.0.3705;)',
+        'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*',
+        'accept-encoding': 'gzip',
+    },
+    { # worked on a different vm for a few days, then consistent 429s there also
+        'User-Agent':
+            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36',
+        'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*',
+        'accept-encoding': 'gzip',
+    },
     {'upgrade-insecure-requests': '1', 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/89.0.4389.114 Safari/537.36 Edg/89.0.774.76', 'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3', 'sec-ch-ua': 'Microsoft Edge;v="89", "Chromium";v="89", ";Not A Brand";v="99"', 'sec-ch-ua-mobile': '?0', 'sec-ch-ua-platform': 'Windows', 'sec-fetch-site': 'none', 'sec-fetch-mod': '', 'sec-fetch-user': '?1', 'accept-encoding': 'gzip', 'accept-language': 'en-US,es;q=0.6'},
     {'upgrade-insecure-requests': '1', 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/86.0.4240.198 Safari/537.36 Edg/86.0.622.69', 'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8', 'sec-ch-ua': 'Microsoft Edge;v="86", "Chromium";v="86", ";Not A Brand";v="99"', 'sec-ch-ua-mobile': '?0', 'sec-ch-ua-platform': 'Windows', 'sec-fetch-site': 'none', 'sec-fetch-mod': '', 'sec-fetch-user': '?1', 'accept-encoding': 'gzip', 'accept-language': 'en-US,en;q=0.9,es;q=0.8'},
     {'upgrade-insecure-requests': '1', 'User-Agent': 'Mozilla/5.0 (Windows NT 6.3; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/90.0.4430.93 Safari/537.36', 'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3', 'sec-ch-ua': 'Google Chrome;v="90", "Chromium";v="90", ";Not A Brand";v="99"', 'sec-ch-ua-mobile': '?0', 'sec-ch-ua-platform': 'Windows', 'sec-fetch-site': 'none', 'sec-fetch-mod': '', 'sec-fetch-user': '?1', 'accept-encoding': 'gzip, deflate', 'accept-language': 'en-US,en;q=0.9,it;q=0.8'},
@@ -111,78 +123,82 @@ HEADERS = [
 ]
 
 
-class TimeoutHTTPAdapter(HTTPAdapter):
-    def __init__(self, *args, **kwargs):
-        self.timeout = DEFAULT_TIMEOUT
-        if "timeout" in kwargs:
-            self.timeout = kwargs["timeout"]
-            del kwargs["timeout"]
-        super(TimeoutHTTPAdapter, self).__init__(*args, **kwargs)
+random.seed()
 
-    def send(self, request, **kwargs):
-        timeout = kwargs.get("timeout")
-        if timeout is None:
-            kwargs["timeout"] = self.timeout
-        return super(TimeoutHTTPAdapter, self).send(request, **kwargs)
+# remember LastSession (has cookies), associated Crumb, and which QueryServer
+LastSession = Crumb = QueryServer = None
 
-
-lastsession = crumb = None
-
-def setup_session_with_cookies_and_crumb(session: Session):
-    global lastsession, crumb
-    if lastsession and crumb:
-        return lastsession, crumb
-    crumb = None
-    headers = {**random.choice(HEADERS)}
-    session.headers = headers
+def _setup_session_with_cookies_and_crumb(session: Session):
+    global LastSession, Crumb
+    # use cached value
+    if LastSession and Crumb:
+        return
+    LastSession = None
+    #headers = {**random.choice(HEADERS)}
+    headers = {**HEADERS[0]}
+    session.headers.update(headers)
     try:
         # url change hint from by https://github.com/dpguthrie/yahooquery/issues/241
+        #response = session.get('https://finance.yahoo.com/', stream=False)
         # use stream to avoid downloading the entire page
-        # (does stream allow enough to read the cookies from the server?)
+        #response = session.get('https://finance.yahoo.com/', stream=True)
+        #session.cookies = response.cookies
         # inside context to close the connection
         with session.get('https://finance.yahoo.com/', stream=True) as response:
             session.cookies = response.cookies
     except Exception as e:
         print('ERROR session failed:', e)
         raise
-        return session, None
-    else:
-        lastsession = session
-        crumb = _get_crumb(session)
-        return session, crumb
+    _get_crumb(session)
+    LastSession = session
 
 
 def _get_crumb(session):
+    global QueryServer, Crumb
     try:
-        response = session.get('https://query2.finance.yahoo.com/v1/test/getcrumb')
-        return response.text
+        # does yahoo tell me which queryserver I should use???
+        # should it switch queryservers???
+        # retry with the other one?
+        # probably shouldn't retry for 406, 429 - likely won't work and probably makes the server mad - for which then?
+        # random query1 or query2
+        n = random.randint(1, 2)
+        queryserver = f"query{n}"
+        response = session.get(f'https://{queryserver}.finance.yahoo.com/v1/test/getcrumb')
+        if response.status_code > 399: #in (406, 429):
+            raise ConnectionError(f"{response.status_code}: {response.text.strip()} (query{n})")
+        Crumb = response.text.strip()
+        QueryServer = queryserver
     except (ConnectionError, RetryError) as e:
-        # Cookies most likely not set in previous request
-        print('ERROR crumb failed:', e)
+        # ???: not authorized - Cookies most likely not set in previous request
+        # 406: not acceptable - no matching accept
+        # 429: too many requests - we f'd it up
+        print('ERROR _get_crumb failed:', e)
         raise
-        return None
 
 
-def _init_session(session=None, **kwargs):
-    crumb = None
-    if session is None:
+def init_session(session=None, **kwargs):
+    if not session:
         session = Session()
         if kwargs.get("proxies"):
             session.proxies = kwargs.get("proxies")
-        retries = Retry(
-            total=kwargs.get("retry", 5),
-            backoff_factor=kwargs.get("backoff_factor", 0.3),
-            status_forcelist=kwargs.get("status_forcelist", [429, 500, 502, 503, 504]),
-        )
         if kwargs.get("verify") is not None:
             session.verify = kwargs.get("verify")
-        session.mount(
-            "https://",
-            TimeoutHTTPAdapter(
-                max_retries=retries, timeout=kwargs.get("timeout", DEFAULT_TIMEOUT)
-            ),
-        )
-        session, crumb = setup_session_with_cookies_and_crumb(session)
-    return session, crumb
+    _setup_session_with_cookies_and_crumb(session)
+    # should this API just require using set attributes instead of returning???
+    return LastSession, Crumb
 
 
+
+if __name__ == '__main__':
+
+    rsess = rcrumb = None
+    try:
+        rsess, rcrumb, rquery = init_session()
+    except Exception as e:
+        print(f"Failure: {e}")
+
+    print("----------")
+    print(f"rQuery: {rquery or 'na'}\nrCrumb: {rcrumb or 'na'}\nrCookies: {rsess.cookies if rsess else 'na'}")
+    print("----------")
+    print(f"gQuery: {QueryServer or 'na'}\ngCrumb: {Crumb or 'na'}\ngCookies: {LastSession.cookies if LastSession else 'na'}")
+    print("----------")
