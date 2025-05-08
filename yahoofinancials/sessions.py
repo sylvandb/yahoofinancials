@@ -134,7 +134,9 @@ def _setup_session_with_cookies_and_crumb(session: Session):
     if LastSession and Crumb:
         return
     LastSession = None
+    # failing
     #headers = {**random.choice(HEADERS)}
+    # maybe yahoo lets mozilla/4.0 off easy?
     headers = {**HEADERS[0]}
     session.headers.update(headers)
     try:
@@ -146,6 +148,8 @@ def _setup_session_with_cookies_and_crumb(session: Session):
         # inside context to close the connection
         with session.get('https://finance.yahoo.com/', stream=True) as response:
             session.cookies = response.cookies
+            if response.status_code != 200: #in (406, 429):
+                raise ConnectionError(f"{status_code}: {response.text.strip()} (finance)")
     except Exception as e:
         print('ERROR session failed:', e)
         raise
@@ -163,10 +167,12 @@ def _get_crumb(session):
         # random query1 or query2
         n = random.randint(1, 2)
         queryserver = f"query{n}"
-        response = session.get(f'https://{queryserver}.finance.yahoo.com/v1/test/getcrumb')
-        if response.status_code > 399: #in (406, 429):
-            raise ConnectionError(f"{response.status_code}: {response.text.strip()} (query{n})")
-        Crumb = response.text.strip()
+        with session.get(f'https://{queryserver}.finance.yahoo.com/v1/test/getcrumb') as response:
+            status_code = response.status_code
+            crumb = response.text.strip()
+        if status_code != 200: #in (406, 429):
+            raise ConnectionError(f"{status_code}: {crumb} (queryserver)")
+        Crumb = crumb
         QueryServer = queryserver
     except (ConnectionError, RetryError) as e:
         # ???: not authorized - Cookies most likely not set in previous request

@@ -48,13 +48,14 @@ class UrlOpener:
             time.sleep(self._min_interval - delta + min(1, self._min_interval))
             now = time.time()
         self._lastget[0] = now
-        response = self._session.get(
-            url=url,
-            params=params,
-            proxies=proxy,
-            timeout=timeout,
-        )
-        return response
+        with self._session.get(
+                    url=url,
+                    params=params,
+                    proxies=proxy,
+                    timeout=timeout,
+                ) as response:
+            self.status_code = response.status_code
+            self.text = response.text
 
 
 class YahooFinanceData(object):
@@ -192,14 +193,11 @@ class YahooFinanceData(object):
         if not "&crumb=" in cur_url:
             cur_url += "&crumb=" + self.crumb
         urlopener = UrlOpener(self.session, min_interval=self._MIN_INTERVAL)
-        response = urlopener.open(cur_url, proxy=self._get_proxy(), timeout=self.timeout)
-        if response.status_code == 200:
-            res_content = response.text
-            response.close()
-            self._cache[url] = loads(res_content).get(res_field)
+        urlopener.open(cur_url, proxy=self._get_proxy(), timeout=self.timeout)
+        if urlopener.status_code == 200:
+            self._cache[url] = loads(urlopener.text).get(res_field)
             return self._cache[url]
         else:
-            response.close()
             # Raise a custom exception if we failed
             raise ManagedException("Server replied with server error code, HTTP " + str(response.status_code) +
                                    " code while opening the url: " + str(cur_url))
@@ -399,14 +397,11 @@ class YahooFinanceData(object):
         if not "&crumb=" in cur_url:
             cur_url += "&crumb=" + self.crumb
         urlopener = UrlOpener(self.session, min_interval=self._MIN_INTERVAL)
-        response = urlopener.open(cur_url, proxy=self._get_proxy(), timeout=self.timeout)
-        if response.status_code == 200:
-            res_content = response.text
-            response.close()
-            data = loads(res_content)
+        urlopener.open(cur_url, proxy=self._get_proxy(), timeout=self.timeout)
+        if urlopener.status_code == 200:
+            data = loads(urlopener.text)
             self._cache[url] = data
             return data
-        response.close()
         return None
 
     # Private Method to clean API data
