@@ -41,8 +41,8 @@ earnings_data = yahoo_financials.get_stock_earnings_data()
 historical_prices = yahoo_financials.get_historical_price_data('2015-01-15', '2017-10-15', 'weekly')
 """
 
-from yahoofinancials.calcs import num_shares_outstanding, eps
-from yahoofinancials.data import YahooFinanceData
+from .calcs import num_shares_outstanding, eps
+from .data import YahooFinanceData
 
 __version__ = "1.17++"
 __author__ = "Connor Sanders"
@@ -139,9 +139,7 @@ class YahooFinancials(YahooFinanceData):
 
     # Public Method for the user to get the yahoo summary url
     def get_stock_summary_url(self):
-        if isinstance(self.ticker, str):
-            return self._BASE_YAHOO_URL + self.ticker
-        return {t: self._BASE_YAHOO_URL + t for t in self.ticker}
+        return {t: self._BASE_YAHOO_URL + t for t in self.tickers}
 
     # Public Method for the user to get stock quote data
     def get_stock_quote_type_data(self):
@@ -165,59 +163,42 @@ class YahooFinancials(YahooFinanceData):
     # Private Method for Functions needing stock_price_data
     def _stock_price_data(self, data_field):
         price_data = self.get_stock_price_data()
-        if isinstance(self.ticker, str):
-            if price_data[self.ticker] is None:
-                return None
-            return price_data[self.ticker].get(data_field)
-        else:
-            ret_obj = {}
-            for tick in self.ticker:
-                if price_data[tick] is None:
-                    ret_obj.update({tick: None})
-                else:
-                    ret_obj.update({tick: price_data[tick].get(data_field)})
-            return ret_obj
+        ret_obj = {}
+        for tick in self.tickers:
+            if price_data[tick] is None:
+                ret_obj.update({tick: None})
+            else:
+                ret_obj.update({tick: price_data[tick].get(data_field)})
+        return ret_obj
 
     # Private Method for Functions needing stock_price_data
     def _stock_summary_data(self, data_field):
         sum_data = self.get_summary_data()
-        if isinstance(self.ticker, str):
-            if sum_data[self.ticker] is None:
-                return None
-            return sum_data[self.ticker].get(data_field, None)
-        else:
-            ret_obj = {}
-            for tick in self.ticker:
-                if sum_data[tick] is None:
-                    ret_obj.update({tick: None})
-                else:
-                    ret_obj.update({tick: sum_data[tick].get(data_field, None)})
-            return ret_obj
+        ret_obj = {}
+        for tick in self.tickers:
+            if sum_data[tick] is None:
+                ret_obj.update({tick: None})
+            else:
+                ret_obj.update({tick: sum_data[tick].get(data_field, None)})
+        return ret_obj
 
     # Private Method for Functions needing financial statement data
     def _financial_statement_data(self, stmt_type, stmt_code, field_name, freq):
         re_data = self.get_financial_stmts(freq, stmt_type)[stmt_code]
-        if isinstance(self.ticker, str):
+        data = {}
+        for tick in self.tickers:
             try:
-                date_key = re_data[self.ticker][0].keys()[0]
-            except (IndexError, AttributeError, TypeError):
-                date_key = list(re_data[self.ticker][0])[0]
-            data = re_data[self.ticker][0][date_key].get(field_name)
-        else:
-            data = {}
-            for tick in self.ticker:
+                date_key = re_data[tick][0].keys()[0]
+            except:
                 try:
-                    date_key = re_data[tick][0].keys()[0]
+                    date_key = list(re_data[tick][0].keys())[0]
                 except:
-                    try:
-                        date_key = list(re_data[tick][0].keys())[0]
-                    except:
-                        date_key = None
-                if date_key is not None:
-                    sub_data = re_data[tick][0][date_key][field_name]
-                    data.update({tick: sub_data})
-                else:
-                    data.update({tick: None})
+                    date_key = None
+            if date_key is not None:
+                sub_data = re_data[tick][0][date_key][field_name]
+                data.update({tick: sub_data})
+            else:
+                data.update({tick: None})
         return data
 
     # Public method to get daily dividend data
@@ -359,26 +340,20 @@ class YahooFinancials(YahooFinanceData):
     def get_earnings_per_share(self):
         price_data = self.get_current_price()
         pe_ratio = self.get_pe_ratio()
-        if isinstance(self.ticker, str):
-            return eps(price_data, pe_ratio)
-        else:
-            ret_obj = {}
-            for tick in self.ticker:
-                re_val = eps(price_data[tick], pe_ratio[tick])
-                ret_obj.update({tick: re_val})
-            return ret_obj
+        ret_obj = {}
+        for tick in self.tickers:
+            re_val = eps(price_data[tick], pe_ratio[tick])
+            ret_obj.update({tick: re_val})
+        return ret_obj
 
     def get_num_shares_outstanding(self, price_type='current'):
         today_low = self._stock_summary_data('dayHigh')
         today_high = self._stock_summary_data('dayLow')
         cur_market_cap = self._stock_summary_data('marketCap')
         current = self.get_current_price()
-        if isinstance(self.ticker, str):
-            return num_shares_outstanding(cur_market_cap, today_low, today_high, price_type, current)
-        else:
-            ret_obj = {}
-            for tick in self.ticker:
-                re_data = num_shares_outstanding(cur_market_cap[tick], today_low[tick],
-                                                 today_high[tick], price_type, current[tick])
-                ret_obj.update({tick: re_data})
-            return ret_obj
+        ret_obj = {}
+        for tick in self.tickers:
+            re_data = num_shares_outstanding(cur_market_cap[tick], today_low[tick],
+                                             today_high[tick], price_type, current[tick])
+            ret_obj.update({tick: re_data})
+        return ret_obj

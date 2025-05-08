@@ -3,21 +3,12 @@ import datetime
 import logging
 import random
 import time
-from functools import partial
 from json import loads
-from multiprocessing import Pool
 import pytz
-import requests as requests
 
-from yahoofinancials.maps import COUNTRY_MAP, REQUEST_MAP, USER_AGENTS
-from yahoofinancials.sessions import init_session
-from yahoofinancials.utils import remove_prefix, get_request_config, get_request_category
-
-# track the last get timestamp to add a minimum delay between gets - be nice!
-_lastget = 0
-
-
-# logger = log_to_stderr(logging.DEBUG)
+from .maps import COUNTRY_MAP, REQUEST_MAP
+from .sessions import init_session
+from .utils import remove_prefix, get_request_config, get_request_category
 
 
 # Custom Exception class to handle custom error
@@ -28,6 +19,8 @@ class ManagedException(Exception):
 # Class used to get data from urls
 class UrlOpener:
 
+    # need to use same user-agent as crumb request
+    # do we need *anything* different here???
     request_headers = {
         "accept": "*/*",
         "accept-encoding": "gzip, deflate, br",
@@ -38,19 +31,28 @@ class UrlOpener:
         "sec-fetch-mode": "cors",
         "sec-fetch-site": "same-site",
     }
-    user_agent = random.choice(USER_AGENTS)
-    request_headers["User-Agent"] = user_agent
 
-    def __init__(self, session=None):
-        self._session = session or requests
+    # as list to be updated by instances
+    _lastget = [0]
 
-    def open(self, url, request_headers=None, params=None, proxy=None, timeout=30):
+    def __init__(self, session, min_interval=7):
+        self._session = session
+        self._session.headers.update(self.request_headers)
+        self._min_interval = abs(min_interval)
+
+    def open(self, url, params=None, proxy=None, timeout=30):
+        # be nice and don't bother yahoo by asking too often
+        now = time.time()
+        delta = now - self._lastget[0]
+        if delta < self._min_interval:
+            time.sleep(self._min_interval - delta + min(1, self._min_interval))
+            now = time.time()
+        self._lastget[0] = now
         response = self._session.get(
             url=url,
             params=params,
             proxies=proxy,
             timeout=timeout,
-            headers=request_headers or self.request_headers
         )
         return response
 
@@ -58,17 +60,17 @@ class UrlOpener:
 class YahooFinanceData(object):
 
     def __init__(self, ticker, **kwargs):
-        self.ticker = ticker.upper() if isinstance(ticker, str) else [t.upper() for t in ticker]
+        # yahoo uses only uppercase tickers
+        self.tickers = [ticker.upper()] if isinstance(ticker, str) else [t.upper() for t in ticker]
         self.country = kwargs.get("country", "US")
         if self.country.upper() not in COUNTRY_MAP.keys():
             raise ReferenceError("invalid country: " + self.country)
-        self.concurrent = kwargs.get("concurrent", False)
         self.max_workers = kwargs.get("max_workers", 8)
         self.timeout = kwargs.get("timeout", 30)
         self.proxies = kwargs.get("proxies")
         self.flat_format = kwargs.get("flat_format", False)
         self._cache = {}
-        self.session, self.crumb = init_session(kwargs.pop("session", None), **kwargs)
+        self.session, self.crumb, self.queryserver = init_session(kwargs.pop("session", None), **kwargs)
 
     # Minimum interval between Yahoo Finance requests for this instance
     _MIN_INTERVAL = 7
@@ -147,13 +149,6 @@ class YahooFinanceData(object):
             return {"https": proxy_str}
         return None
 
-    # Private method that determines number of workers to use in a process
-    def _get_worker_count(self):
-        workers = self.max_workers
-        if len(self.ticker) < workers:
-            workers = len(self.ticker)
-        return workers
-
     # Private method to construct historical data url
     def _construct_url(self, symbol, config, params, freq, request_type):
         url = config["path"].replace("{symbol}", symbol.lower())
@@ -191,33 +186,23 @@ class YahooFinanceData(object):
 
     # Private method to execute a web scrape request and decrypt the return
     def _request_handler(self, url, res_field=""):
-        urlopener = UrlOpener(self.session)
-        # Try to open the URL up to 10 times sleeping random time if something goes wrong
+        if self._cache.get(url):
+            return self._cache[url]
         cur_url = url
-        max_retry = 10
         if not "&crumb=" in cur_url:
             cur_url += "&crumb=" + self.crumb
-        for i in range(0, max_retry):
-            response = urlopener.open(cur_url, proxy=self._get_proxy(), timeout=self.timeout)
-            if response.status_code != 200:
-                time.sleep(random.randrange(1, 5))
-                response.close()
-                time.sleep(random.randrange(1, 5))
-                if response.status_code == 404 and i % 2 == 0:
-                    if 'query2.' in cur_url:
-                        cur_url = cur_url.replace("query2.", "query1.")
-                    elif 'query1.' in cur_url:
-                        cur_url = cur_url.replace("query1.", "query2.")
-
-            else:
-                res_content = response.text
-                response.close()
-                self._cache[url] = loads(res_content).get(res_field)
-                break
-            if i == max_retry - 1:
-                # Raise a custom exception if we can't get the web page within max_retry attempts
-                raise ManagedException("Server replied with server error code, HTTP " + str(response.status_code) +
-                                       " code while opening the url: " + str(cur_url))
+        urlopener = UrlOpener(self.session, min_interval=self._MIN_INTERVAL)
+        response = urlopener.open(cur_url, proxy=self._get_proxy(), timeout=self.timeout)
+        if response.status_code == 200:
+            res_content = response.text
+            response.close()
+            self._cache[url] = loads(res_content).get(res_field)
+            return self._cache[url]
+        else:
+            response.close()
+            # Raise a custom exception if we failed
+            raise ManagedException("Server replied with server error code, HTTP " + str(response.status_code) +
+                                   " code while opening the url: " + str(cur_url))
 
     @staticmethod
     def _format_raw_fundamental_data(raw_data):
@@ -248,17 +233,7 @@ class YahooFinanceData(object):
 
     # Private method to _get_historical_data from yahoo finance
     def _get_historical_data(self, url, config, tech_type, statement_type):
-        global _lastget
-        if not self._cache.get(url):
-            self._MIN_INTERVAL = abs(self._MIN_INTERVAL)
-            now = time.time()
-            delta = now - _lastget
-            if _lastget and delta < self._MIN_INTERVAL:
-                time.sleep(self._MIN_INTERVAL - delta + min(1, self._MIN_INTERVAL))
-                now = time.time()
-            _lastget = now
-            self._request_handler(url, config.get("response_field"))
-        data = self._cache[url]
+        data = self._request_handler(url, config.get("response_field"))
         if tech_type == '' and statement_type in ["income", "balance", "cash"]:
             data = self._format_raw_fundamental_data(data)
         elif statement_type == 'analytic':
@@ -399,7 +374,7 @@ class YahooFinanceData(object):
         return data
 
     # Private Static Method to build API url for GET Request
-    def _build_api_url(self, hist_obj, up_ticker, v="2", events=None):
+    def _build_api_url(self, hist_obj, up_ticker, events=None):
         if events is None:
             events = ["div", "split", "earn"]
         event_str = ''
@@ -408,7 +383,7 @@ class YahooFinanceData(object):
                 event_str += s + "|"
             elif idx == len(events):
                 event_str += s
-        base_url = "https://query" + v + ".finance.yahoo.com/v8/finance/chart/"
+        base_url = f"https://{self.queryserver}.finance.yahoo.com/v8/finance/chart/"
         api_url = base_url + up_ticker + '?symbol=' + up_ticker + '&period1=' + str(hist_obj['start']) + '&period2=' + \
                   str(hist_obj['end']) + '&interval=' + hist_obj['interval']
         country_ent = COUNTRY_MAP.get(self.country.upper())
@@ -417,33 +392,22 @@ class YahooFinanceData(object):
         return api_url
 
     # Private Method to get financial data via API Call
-    def _get_api_data(self, api_url, tries=0):
-        if tries == 0 and self._cache.get(api_url):
-            return self._cache[api_url]
-        cur_url = api_url
-        if tries > 0 and tries % 2 == 0:
-            if 'query2.' in cur_url:
-                cur_url = cur_url.replace("query2.", "query1.")
-            elif 'query1.' in cur_url:
-                cur_url = cur_url.replace("query1.", "query2.")
-        urlopener = UrlOpener(self.session)
+    def _get_api_data(self, url):
+        if self._cache.get(url):
+            return self._cache[url]
+        cur_url = url
+        if not "&crumb=" in cur_url:
+            cur_url += "&crumb=" + self.crumb
+        urlopener = UrlOpener(self.session, min_interval=self._MIN_INTERVAL)
         response = urlopener.open(cur_url, proxy=self._get_proxy(), timeout=self.timeout)
         if response.status_code == 200:
             res_content = response.text
             response.close()
             data = loads(res_content)
-            self._cache[api_url] = data
+            self._cache[url] = data
             return data
-        else:
-            if tries < 5:
-                time.sleep(random.randrange(1, 5))
-                response.close()
-                time.sleep(random.randrange(1, 5))
-                tries += 1
-                return self._get_api_data(api_url, tries)
-            else:
-                response.close()
-                return None
+        response.close()
+        return None
 
     # Private Method to clean API data
     def _clean_api_data(self, api_url):
@@ -487,22 +451,14 @@ class YahooFinanceData(object):
         return ret_obj
 
     # Private Method to Handle Recursive API Request
-    def _recursive_api_request(self, hist_obj, up_ticker, clean=True, i=0):
-        v = "2"
+    def _recursive_api_request(self, hist_obj, up_ticker, clean=True):
         if clean:
-            re_data = self._clean_api_data(self._build_api_url(hist_obj, up_ticker, v))
+            re_data = self._clean_api_data(self._build_api_url(hist_obj, up_ticker))
             cleaned_re_data = self._clean_historical_data(re_data)
-            if cleaned_re_data is not None:
-                return cleaned_re_data
+            return cleaned_re_data
         else:
-            re_data = self._get_api_data(self._build_api_url(hist_obj, up_ticker, v))
-            if re_data is not None:
-                return re_data
-        if i < 6:
-            i += 1
-            return self._recursive_api_request(hist_obj, up_ticker, clean, i)
-        elif clean:
-            return self._clean_historical_data(re_data, True)
+            re_data = self._get_api_data(self._build_api_url(hist_obj, up_ticker))
+            return re_data
 
     # Private Method to take scrapped data and build a data dictionary with, used by get_stock_data()
     def _create_dict_ent(self, up_ticker, statement_type, tech_type, report_name, hist_obj):
@@ -542,17 +498,6 @@ class YahooFinanceData(object):
                     re_data = None
                 dict_ent = {up_ticker: re_data}
             return dict_ent
-
-    def _retry_create_dict_ent(self, up_ticker, statement_type, tech_type, report_name, hist_obj):
-        i = 0
-        while i < 250:
-            try:
-                out = self._create_dict_ent(up_ticker, statement_type, tech_type, report_name, hist_obj)
-                return out
-            except:
-                time.sleep(random.randint(2, 10))
-                i += 1
-                continue
 
     # Private method to return the stmt_id for the reformat_process
     def _get_stmt_id(self, statement_type, raw_data):
@@ -609,30 +554,13 @@ class YahooFinanceData(object):
             statement_type = 'profile'
             tech_type = 'assetProfile'
             report_name = 'assetProfile'
-        if isinstance(self.ticker, str):
-            dict_ent = self._retry_create_dict_ent(self.ticker, statement_type, tech_type, report_name, hist_obj)
-            data.update(dict_ent)
-        else:
-            if self.concurrent:
-                with Pool(self._get_worker_count()) as pool:
-                    dict_ents = pool.map(partial(self._retry_create_dict_ent,
-                                                 statement_type=statement_type,
-                                                 tech_type=tech_type,
-                                                 report_name=report_name,
-                                                 hist_obj=hist_obj), self.ticker)
-                    for dict_ent in dict_ents:
-                        data.update(dict_ent)
-                    pool.close()
-                    pool.join()
-            else:
-                for tick in self.ticker:
-                    try:
-                        dict_ent = self._create_dict_ent(tick, statement_type, tech_type, report_name, hist_obj)
-                        data.update(dict_ent)
-                    except ManagedException:
-                        logging.warning("yahoofinancials ticker: %s error getting %s - %s\n\tContinuing extraction...",
-                                        str(tick), statement_type, str(ManagedException))
-                        continue
+        for tick in self.tickers:
+            try:
+                dict_ent = self._create_dict_ent(tick, statement_type, tech_type, report_name, hist_obj)
+                data.update(dict_ent)
+            except ManagedException:
+                logging.warning("yahoofinancials ticker: %s error getting %s - %s\n\tContinuing extraction...",
+                                str(tick), statement_type, str(ManagedException))
         return data
 
     # Public Method to get technical stock data
@@ -646,26 +574,11 @@ class YahooFinanceData(object):
     def get_reformatted_stmt_data(self, raw_data):
         sub_dict, data_dict = {}, {}
         data_type = raw_data['dataType']
-        if isinstance(self.ticker, str):
-            sub_dict_ent = self._get_sub_dict_ent(self.ticker, raw_data)
+        for tick in self.tickers:
+            sub_dict_ent = self._get_sub_dict_ent(tick, raw_data)
             sub_dict.update(sub_dict_ent)
-            dict_ent = {data_type: sub_dict}
-            data_dict.update(dict_ent)
-        else:
-            if self.concurrent:
-                with Pool(self._get_worker_count()) as pool:
-                    sub_dict_ents = pool.map(partial(self._get_sub_dict_ent,
-                                                     raw_data=raw_data), self.ticker)
-                    for dict_ent in sub_dict_ents:
-                        sub_dict.update(dict_ent)
-                    pool.close()
-                    pool.join()
-            else:
-                for tick in self.ticker:
-                    sub_dict_ent = self._get_sub_dict_ent(tick, raw_data)
-                    sub_dict.update(sub_dict_ent)
-            dict_ent = {data_type: sub_dict}
-            data_dict.update(dict_ent)
+        dict_ent = {data_type: sub_dict}
+        data_dict.update(dict_ent)
         return data_dict
 
     # Public method to get cleaned report data
@@ -685,23 +598,9 @@ class YahooFinanceData(object):
     # Public method to get cleaned summary and price report data
     def get_clean_data(self, raw_report_data, report_type):
         cleaned_data_dict = {}
-        if isinstance(self.ticker, str):
-            cleaned_data = self._clean_data_process(self.ticker, report_type, raw_report_data)
-            cleaned_data_dict.update({self.ticker: cleaned_data})
-        else:
-            if self.concurrent:
-                with Pool(self._get_worker_count()) as pool:
-                    cleaned_data_list = pool.map(partial(self._clean_data_process,
-                                                         report_type=report_type,
-                                                         raw_report_data=raw_report_data), self.ticker)
-                    for idx, cleaned_data in enumerate(cleaned_data_list):
-                        cleaned_data_dict.update({self.ticker[idx]: cleaned_data})
-                    pool.close()
-                    pool.join()
-            else:
-                for tick in self.ticker:
-                    cleaned_data = self._clean_data_process(tick, report_type, raw_report_data)
-                    cleaned_data_dict.update({tick: cleaned_data})
+        for tick in self.tickers:
+            cleaned_data = self._clean_data_process(tick, report_type, raw_report_data)
+            cleaned_data_dict.update({tick: cleaned_data})
         return cleaned_data_dict
 
     # Private method to handle dividend data requests
@@ -721,28 +620,11 @@ class YahooFinanceData(object):
     # Public method to get daily dividend data
     def get_stock_dividend_data(self, start, end, interval):
         interval_code = self.get_time_code(interval)
-        if isinstance(self.ticker, str):
+        re_data = {}
+        for tick in self.tickers:
             try:
-                return {self.ticker: self._handle_api_dividend_request(self.ticker, start, end, interval_code)}
+                div_data = self._handle_api_dividend_request(tick, start, end, interval_code)
+                re_data.update({tick: div_data})
             except:
-                return {self.ticker: None}
-        else:
-            re_data = {}
-            if self.concurrent:
-                with Pool(self._get_worker_count()) as pool:
-                    div_data_list = pool.map(partial(self._handle_api_dividend_request,
-                                                     start=start,
-                                                     end=end,
-                                                     interval=interval_code), self.ticker)
-                    for idx, div_data in enumerate(div_data_list):
-                        re_data.update({self.ticker[idx]: div_data})
-                    pool.close()
-                    pool.join()
-            else:
-                for tick in self.ticker:
-                    try:
-                        div_data = self._handle_api_dividend_request(tick, start, end, interval_code)
-                        re_data.update({tick: div_data})
-                    except:
-                        re_data.update({tick: None})
-            return re_data
+                re_data.update({tick: None})
+        return re_data

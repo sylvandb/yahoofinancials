@@ -185,7 +185,7 @@ def init_session(session=None, **kwargs):
             session.verify = kwargs.get("verify")
     _setup_session_with_cookies_and_crumb(session)
     # should this API just require using set attributes instead of returning???
-    return LastSession, Crumb
+    return LastSession, Crumb, QueryServer
 
 
 

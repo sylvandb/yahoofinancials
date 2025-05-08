@@ -1,1 +1,1 @@
-from yahoofinancials.yf import YahooFinancials
+from .yf import YahooFinancials
