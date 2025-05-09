@@ -185,7 +185,7 @@ class YahooFinanceData(object):
             url += "?symbol=" + params.get("symbol")
         return url
 
-    # Private method to execute a web scrape request and decrypt the return
+    # Private method to execute a web scrape request
     def _request_handler(self, url, res_field=""):
         if self._cache.get(url):
             return self._cache[url]
@@ -194,13 +194,11 @@ class YahooFinanceData(object):
             cur_url += "&crumb=" + self.crumb
         urlopener = UrlOpener(self.session, min_interval=self._MIN_INTERVAL)
         urlopener.open(cur_url, proxy=self._get_proxy(), timeout=self.timeout)
-        if urlopener.status_code == 200:
-            self._cache[url] = loads(urlopener.text).get(res_field)
-            return self._cache[url]
-        else:
-            # Raise a custom exception if we failed
-            raise ManagedException("Server replied with server error code, HTTP " + str(response.status_code) +
-                                   " code while opening the url: " + str(cur_url))
+        if urlopener.status_code != 200:
+            raise ManagedException(
+                f"Server replied with server HTTP error code {response.status_code} while opening the url: {cur_url}")
+        self._cache[url] = loads(urlopener.text).get(res_field)
+        return self._cache[url]
 
     @staticmethod
     def _format_raw_fundamental_data(raw_data):
@@ -398,11 +396,11 @@ class YahooFinanceData(object):
             cur_url += "&crumb=" + self.crumb
         urlopener = UrlOpener(self.session, min_interval=self._MIN_INTERVAL)
         urlopener.open(cur_url, proxy=self._get_proxy(), timeout=self.timeout)
-        if urlopener.status_code == 200:
-            data = loads(urlopener.text)
-            self._cache[url] = data
-            return data
-        return None
+        if urlopener.status_code != 200:
+            # why is this not an exception???
+            return None
+        self._cache[url] = loads(urlopener.text)
+        return self._cache[url]
 
     # Private Method to clean API data
     def _clean_api_data(self, api_url):

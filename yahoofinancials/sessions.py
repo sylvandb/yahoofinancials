@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 import random
-from urllib3.util import Retry
 from requests import Session
 from requests.exceptions import ConnectionError, RetryError
 
@@ -147,7 +146,7 @@ def _setup_session_with_cookies_and_crumb(session: Session):
         #session.cookies = response.cookies
         # inside context to close the connection
         with session.get('https://finance.yahoo.com/', stream=True) as response:
-            session.cookies = response.cookies
+            # this is automatic: session.cookies = response.cookies
             if response.status_code != 200: #in (406, 429):
                 raise ConnectionError(f"{status_code}: {response.text.strip()} (finance)")
     except Exception as e:
