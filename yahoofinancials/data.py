@@ -4,7 +4,13 @@ import logging
 import random
 import time
 from json import loads
-import pytz
+try:
+    # use standard ZoneInfo since python 3.9
+    # windows might need 'pip install tzdata'
+    from zoneinfo import ZoneInfo
+except ImportError:
+    # fallback
+    import pytz
 
 from .maps import COUNTRY_MAP, REQUEST_MAP
 from .sessions import init_session
@@ -134,10 +140,15 @@ class YahooFinanceData(object):
     # Private Static Method to Convert Eastern Time to UTC
     @staticmethod
     def _convert_to_utc(date, mask='%Y-%m-%d %H:%M:%S'):
-        utc = pytz.utc
-        eastern = pytz.timezone('US/Eastern')
         date_ = datetime.datetime.strptime(date.replace(" 0:", " 12:"), mask)
-        date_eastern = eastern.localize(date_, is_dst=None)
+        try:
+            utc = ZoneInfo('UTC')
+            eastern = ZoneInfo('America/New_York') # could be: ZoneInfo('US/Eastern')
+            date_eastern = date_.replace(tzinfo=eastern)
+        except NameError:
+            utc = pytz.utc
+            eastern = pytz.timezone('US/Eastern')
+            date_eastern = eastern.localize(date_, is_dst=None)
         date_utc = date_eastern.astimezone(utc)
         return date_utc.strftime('%Y-%m-%d %H:%M:%S %Z%z')
 
