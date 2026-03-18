@@ -196,7 +196,7 @@ class YahooFinanceData(object):
         urlopener.open(cur_url, proxy=self._get_proxy(), timeout=self.timeout)
         if urlopener.status_code != 200:
             raise ManagedException(
-                f"Server replied with server HTTP error code {response.status_code} while opening the url: {cur_url}")
+                f"Server replied with server HTTP error code {urlopener.status_code} while opening the url: {cur_url}")
         self._cache[url] = loads(urlopener.text).get(res_field)
         return self._cache[url]
 
@@ -551,9 +551,9 @@ class YahooFinanceData(object):
             try:
                 dict_ent = self._create_dict_ent(tick, statement_type, tech_type, report_name, hist_obj)
                 data.update(dict_ent)
-            except ManagedException:
-                logging.warning("yahoofinancials ticker: %s error getting %s - %s\n\tContinuing extraction...",
-                                str(tick), statement_type, str(ManagedException))
+            except ManagedException as e:
+                logging.warning("yahoofinancials ticker: %s error getting %s\n - %s\nContinuing extraction...",
+                                str(tick), statement_type, str(e))
         return data
 
     # Public Method to get technical stock data
